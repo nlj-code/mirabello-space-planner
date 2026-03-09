@@ -94,6 +94,102 @@ export default function CanvasStage({ stageRef, onContextMenu, eraseMode, eraseB
     transformerRef.current.getLayer()?.batchDraw();
   }, [state.selectedIds, state.items, stageRef]);
 
+  // ── Snapshot (copy area) state ──
+  const snapshotRectStartRef = useRef<{ x: number; y: number } | null>(null);
+  const [tempSnapshotRect, setTempSnapshotRect] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
+  // Ref mirror of tempSnapshotRect — always has latest value for use in Konva event handlers (avoids stale closure)
+  const tempSnapshotRectRef = useRef<{ x: number; y: number; w: number; h: number } | null>(null);
+  const [snapshotAdjusting, setSnapshotAdjusting] = useState(false);
+  const snapshotAdjustingRef = useRef(false);
+  const adjustHandleRef = useRef<string | null>(null);
+  const adjustStartRef = useRef<{ mx: number; my: number; rect: { x: number; y: number; w: number; h: number } } | null>(null);
+
+  // Wrapper that keeps ref and state in sync (use this everywhere instead of setTempSnapshotRect directly)
+  const setSnapshotRect = useCallback((val: { x: number; y: number; w: number; h: number } | null) => {
+    tempSnapshotRectRef.current = val;
+    setTempSnapshotRect(val);
+  }, []);
+
+  // Clean up snapshot state when tool changes away from 'snapshot'
+  useEffect(() => {
+    if (state.currentTool !== 'snapshot') {
+      snapshotRectStartRef.current = null;
+      snapshotAdjustingRef.current = false;
+      setSnapshotAdjusting(false);
+      adjustHandleRef.current = null;
+      adjustStartRef.current = null;
+      setSnapshotRect(null);
+    }
+  }, [state.currentTool]);
+
+  const captureSnapshot = useCallback(() => {
+    const rect = tempSnapshotRectRef.current;
+    snapshotAdjustingRef.current = false;
+    setSnapshotAdjusting(false);
+    adjustHandleRef.current = null;
+    adjustStartRef.current = null;
+    setTempSnapshotRect(null);
+    if (rect && rect.w > 5 && rect.h > 5) {
+      const stage = stageRef.current;
+      if (stage) {
+        const snapshotOverlay = stage.findOne('.snapshot-overlay');
+        const transformer = transformerRef.current;
+        if (snapshotOverlay) snapshotOverlay.visible(false);
+        if (transformer) transformer.visible(false);
+
+        const oldPos = { x: stage.x(), y: stage.y() };
+        const oldScale = { x: stage.scaleX(), y: stage.scaleY() };
+        stage.position({ x: 0, y: 0 });
+        stage.scale({ x: 1, y: 1 });
+
+        const dataUrl = stage.toDataURL({
+          x: rect.x,
+          y: rect.y,
+          width: rect.w,
+          height: rect.h,
+          pixelRatio: 2,
+        });
+
+        stage.position(oldPos);
+        stage.scale(oldScale);
+        if (snapshotOverlay) snapshotOverlay.visible(true);
+        if (transformer) transformer.visible(true);
+
+        const ppm = state.scale.pixelsPerMeter;
+        const widthPx = rect.w;
+        const heightPx = rect.h;
+        const widthCm = (widthPx / ppm) * 100;
+        const heightCm = (heightPx / ppm) * 100;
+        const maxZ = state.items.length > 0 ? Math.max(...state.items.map(it => it.zIndex)) : 0;
+
+        const newItem: CanvasItem = {
+          id: uuidv4(),
+          defId: 'pasted-image',
+          name: 'Area Copy',
+          category: 'Images',
+          x: rect.x + 20,
+          y: rect.y + 20,
+          widthPx,
+          heightPx,
+          widthCm,
+          heightCm,
+          rotation: 0,
+          fill: '#edeae4',
+          opacity: 1,
+          label: '',
+          locked: false,
+          zIndex: maxZ + 1,
+          shape: 'rect',
+          imageData: dataUrl,
+        };
+        pushHistory();
+        dispatch({ type: 'ADD_ITEM', item: newItem });
+        dispatch({ type: 'SET_SELECTED', ids: [newItem.id] });
+        dispatch({ type: 'SET_TOOL', tool: 'select' });
+      }
+    }
+  }, [stageRef, state.scale.pixelsPerMeter, state.items, pushHistory, dispatch, setSnapshotRect]);
+
   // Keyboard events
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -111,6 +207,11 @@ export default function CanvasStage({ stageRef, onContextMenu, eraseMode, eraseB
           dispatch({ type: 'DELETE_ITEMS', ids: state.selectedIds });
         }
       }
+      if (e.key === 'Enter' && state.currentTool === 'snapshot' && snapshotAdjustingRef.current) {
+        e.preventDefault();
+        captureSnapshot();
+        return;
+      }
       if (e.key === 'Escape') {
         if (state.currentTool === 'export') {
           exportRectStartRef.current = null;
@@ -118,7 +219,11 @@ export default function CanvasStage({ stageRef, onContextMenu, eraseMode, eraseB
           onCancelExportSelection?.();
         } else if (state.currentTool === 'snapshot') {
           snapshotRectStartRef.current = null;
-          setTempSnapshotRect(null);
+          snapshotAdjustingRef.current = false;
+          setSnapshotAdjusting(false);
+          adjustHandleRef.current = null;
+          adjustStartRef.current = null;
+          setSnapshotRect(null);
           dispatch({ type: 'SET_TOOL', tool: 'select' });
         } else if (state.currentTool === 'measure') {
           // Cancel current measurement in progress
@@ -159,11 +264,7 @@ export default function CanvasStage({ stageRef, onContextMenu, eraseMode, eraseB
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [state.selectedIds, state.items, state.scale, state.currentTool, state.measurementLines, state.selectedEraseId, dispatch, pushHistory]);
-
-  // ── Snapshot (copy area) state ──
-  const snapshotRectStartRef = useRef<{ x: number; y: number } | null>(null);
-  const [tempSnapshotRect, setTempSnapshotRect] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
+  }, [state.selectedIds, state.items, state.scale, state.currentTool, state.measurementLines, state.selectedEraseId, dispatch, pushHistory, captureSnapshot]);
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -315,8 +416,46 @@ export default function CanvasStage({ stageRef, onContextMenu, eraseMode, eraseB
     // ── Snapshot (copy area) tool ──
     if (state.currentTool === 'snapshot' && e.evt.button === 0) {
       const pos = stage.getRelativePointerPosition()!;
+
+      if (snapshotAdjustingRef.current && tempSnapshotRectRef.current) {
+        // In adjust phase: check if clicking on a handle or inside rect
+        const rect = tempSnapshotRectRef.current;
+        const hs = 12 / state.stageScale; // hit area in canvas units
+
+        const handles: Record<string, [number, number]> = {
+          nw: [rect.x, rect.y],
+          n:  [rect.x + rect.w / 2, rect.y],
+          ne: [rect.x + rect.w, rect.y],
+          e:  [rect.x + rect.w, rect.y + rect.h / 2],
+          se: [rect.x + rect.w, rect.y + rect.h],
+          s:  [rect.x + rect.w / 2, rect.y + rect.h],
+          sw: [rect.x, rect.y + rect.h],
+          w:  [rect.x, rect.y + rect.h / 2],
+        };
+
+        for (const [handle, [hx, hy]] of Object.entries(handles)) {
+          if (Math.abs(pos.x - hx) <= hs && Math.abs(pos.y - hy) <= hs) {
+            adjustHandleRef.current = handle;
+            adjustStartRef.current = { mx: pos.x, my: pos.y, rect: { ...rect } };
+            return;
+          }
+        }
+
+        // Inside body: move handle
+        if (pos.x >= rect.x && pos.x <= rect.x + rect.w &&
+            pos.y >= rect.y && pos.y <= rect.y + rect.h) {
+          adjustHandleRef.current = 'move';
+          adjustStartRef.current = { mx: pos.x, my: pos.y, rect: { ...rect } };
+          return;
+        }
+
+        // Clicked outside: cancel adjusting and start fresh draw
+        snapshotAdjustingRef.current = false;
+        setSnapshotAdjusting(false);
+      }
+
       snapshotRectStartRef.current = pos;
-      setTempSnapshotRect({ x: pos.x, y: pos.y, w: 0, h: 0 });
+      setSnapshotRect({ x: pos.x, y: pos.y, w: 0, h: 0 });
       return;
     }
 
@@ -329,7 +468,7 @@ export default function CanvasStage({ stageRef, onContextMenu, eraseMode, eraseB
         setSelectionRect({ x: pos.x, y: pos.y, w: 0, h: 0 });
       }
     }
-  }, [stageRef, state.currentTool, state.selectedEraseId, eraseMode, dispatch]);
+  }, [stageRef, state.currentTool, state.selectedEraseId, state.stageScale, eraseMode, dispatch]);
 
   const handleMouseMove = useCallback((e: Konva.KonvaEventObject<MouseEvent>) => {
     const stage = stageRef.current;
@@ -388,17 +527,43 @@ export default function CanvasStage({ stageRef, onContextMenu, eraseMode, eraseB
       return;
     }
 
-    // ── Snapshot tool: update preview rect ──
-    if (state.currentTool === 'snapshot' && snapshotRectStartRef.current) {
-      const pos = stage.getRelativePointerPosition()!;
-      const start = snapshotRectStartRef.current;
-      setTempSnapshotRect({
-        x: Math.min(pos.x, start.x),
-        y: Math.min(pos.y, start.y),
-        w: Math.abs(pos.x - start.x),
-        h: Math.abs(pos.y - start.y),
-      });
-      return;
+    // ── Snapshot tool: handle adjust drag or update preview rect ──
+    if (state.currentTool === 'snapshot') {
+      if (adjustHandleRef.current && adjustStartRef.current) {
+        const pos = stage.getRelativePointerPosition()!;
+        const { mx, my, rect: startRect } = adjustStartRef.current;
+        const dx = pos.x - mx;
+        const dy = pos.y - my;
+        let { x, y, w, h } = startRect;
+        switch (adjustHandleRef.current) {
+          case 'move': x += dx; y += dy; break;
+          case 'nw': x += dx; y += dy; w -= dx; h -= dy; break;
+          case 'n':  y += dy; h -= dy; break;
+          case 'ne': w += dx; y += dy; h -= dy; break;
+          case 'e':  w += dx; break;
+          case 'se': w += dx; h += dy; break;
+          case 's':  h += dy; break;
+          case 'sw': x += dx; w -= dx; h += dy; break;
+          case 'w':  x += dx; w -= dx; break;
+        }
+        if (w < 0) { x = x + w; w = -w; }
+        if (h < 0) { y = y + h; h = -h; }
+        if (w < 10) w = 10;
+        if (h < 10) h = 10;
+        setSnapshotRect({ x, y, w, h });
+        return;
+      }
+      if (snapshotRectStartRef.current) {
+        const pos = stage.getRelativePointerPosition()!;
+        const start = snapshotRectStartRef.current;
+        setSnapshotRect({
+          x: Math.min(pos.x, start.x),
+          y: Math.min(pos.y, start.y),
+          w: Math.abs(pos.x - start.x),
+          h: Math.abs(pos.y - start.y),
+        });
+        return;
+      }
     }
 
     if (selStartRef.current) {
@@ -435,73 +600,24 @@ export default function CanvasStage({ stageRef, onContextMenu, eraseMode, eraseB
       return;
     }
 
-    // ── Snapshot tool: capture area and add as item ──
+    // ── Snapshot tool ──
     if (state.currentTool === 'snapshot') {
-      const rect = tempSnapshotRect;
+      // End of handle drag
+      if (adjustHandleRef.current) {
+        adjustHandleRef.current = null;
+        adjustStartRef.current = null;
+        return;
+      }
+      // End of initial draw
       snapshotRectStartRef.current = null;
-      setTempSnapshotRect(null);
-      if (rect && rect.w > 5 && rect.h > 5) {
-        const stage = stageRef.current;
-        if (stage) {
-          // Hide overlays so they don't appear in the capture
-          const snapshotOverlay = stage.findOne('.snapshot-overlay');
-          const transformer = transformerRef.current;
-          if (snapshotOverlay) snapshotOverlay.visible(false);
-          if (transformer) transformer.visible(false);
-
-          // Temporarily reset stage transform so content coordinates
-          // map directly to pixel coordinates for accurate capture
-          const oldPos = { x: stage.x(), y: stage.y() };
-          const oldScale = { x: stage.scaleX(), y: stage.scaleY() };
-          stage.position({ x: 0, y: 0 });
-          stage.scale({ x: 1, y: 1 });
-
-          const dataUrl = stage.toDataURL({
-            x: rect.x,
-            y: rect.y,
-            width: rect.w,
-            height: rect.h,
-            pixelRatio: 2,
-          });
-
-          // Restore stage transform and overlays
-          stage.position(oldPos);
-          stage.scale(oldScale);
-          if (snapshotOverlay) snapshotOverlay.visible(true);
-          if (transformer) transformer.visible(true);
-
-          const ppm = state.scale.pixelsPerMeter;
-          const widthPx = rect.w;
-          const heightPx = rect.h;
-          const widthCm = (widthPx / ppm) * 100;
-          const heightCm = (heightPx / ppm) * 100;
-          const maxZ = state.items.length > 0 ? Math.max(...state.items.map(it => it.zIndex)) : 0;
-
-          // Place copy offset slightly from original
-          const newItem: CanvasItem = {
-            id: uuidv4(),
-            defId: 'pasted-image',
-            name: 'Area Copy',
-            category: 'Images',
-            x: rect.x + 20,
-            y: rect.y + 20,
-            widthPx,
-            heightPx,
-            widthCm,
-            heightCm,
-            rotation: 0,
-            fill: '#edeae4',
-            opacity: 1,
-            label: '',
-            locked: false,
-            zIndex: maxZ + 1,
-            shape: 'rect',
-            imageData: dataUrl,
-          };
-          pushHistory();
-          dispatch({ type: 'ADD_ITEM', item: newItem });
-          dispatch({ type: 'SET_SELECTED', ids: [newItem.id] });
-          dispatch({ type: 'SET_TOOL', tool: 'select' });
+      if (!snapshotAdjustingRef.current) {
+        const rect = tempSnapshotRectRef.current;
+        if (rect && rect.w > 5 && rect.h > 5) {
+          // Enter adjust/crop phase
+          snapshotAdjustingRef.current = true;
+          setSnapshotAdjusting(true);
+        } else {
+          setSnapshotRect(null);
         }
       }
       return;
@@ -556,7 +672,7 @@ export default function CanvasStage({ stageRef, onContextMenu, eraseMode, eraseB
     }
     selStartRef.current = null;
     setSelectionRect(null);
-  }, [selectionRect, state.items, state.currentTool, state.scale.pixelsPerMeter, eraseMode, eraseBrushSize, tempEraseRect, tempExportRect, tempSnapshotRect, onExportRegionSelected, stageRef, dispatch, pushHistory]);
+  }, [selectionRect, state.items, state.currentTool, state.scale.pixelsPerMeter, eraseMode, eraseBrushSize, tempEraseRect, tempExportRect, onExportRegionSelected, stageRef, dispatch, pushHistory, setSnapshotRect]);
 
   const handleItemSelect = useCallback((e: any, id: string) => {
     if (state.currentTool === 'measure' || state.currentTool === 'erase' || state.currentTool === 'export' || state.currentTool === 'snapshot') return; // Don't select items in measure/erase/export/snapshot mode
@@ -876,24 +992,51 @@ export default function CanvasStage({ stageRef, onContextMenu, eraseMode, eraseB
 
           {/* Snapshot area selection rectangle */}
           {tempSnapshotRect && tempSnapshotRect.w > 0 && tempSnapshotRect.h > 0 && (
-            <Group listening={false} name="snapshot-overlay">
+            <Group listening={snapshotAdjusting} name="snapshot-overlay">
+              {/* Body: move handle when adjusting */}
               <Rect
                 x={tempSnapshotRect.x}
                 y={tempSnapshotRect.y}
                 width={tempSnapshotRect.w}
                 height={tempSnapshotRect.h}
-                fill="rgba(109,200,232,0.1)"
+                fill="rgba(109,200,232,0.08)"
                 stroke="#6dc8e8"
                 strokeWidth={2 / state.stageScale}
-                dash={[8 / state.stageScale, 4 / state.stageScale]}
+                dash={snapshotAdjusting ? undefined : [8 / state.stageScale, 4 / state.stageScale]}
+                listening={snapshotAdjusting}
               />
               <Text
-                x={tempSnapshotRect.x}
-                y={tempSnapshotRect.y - 18 / state.stageScale}
-                text="Copy Area"
-                fontSize={12 / state.stageScale}
+                x={tempSnapshotRect.x + 4 / state.stageScale}
+                y={tempSnapshotRect.y - 20 / state.stageScale}
+                text={snapshotAdjusting ? 'Adjust crop area — Enter to capture, Esc to cancel' : 'Copy Area'}
+                fontSize={11 / state.stageScale}
                 fill="#6dc8e8"
+                listening={false}
               />
+              {/* Resize handles — only visible in adjust phase */}
+              {snapshotAdjusting && (() => {
+                const { x, y, w, h } = tempSnapshotRect;
+                const hs = 7 / state.stageScale;
+                const handleDefs: Array<[string, number, number]> = [
+                  ['nw', x, y], ['n', x + w / 2, y], ['ne', x + w, y],
+                  ['e', x + w, y + h / 2],
+                  ['se', x + w, y + h], ['s', x + w / 2, y + h], ['sw', x, y + h],
+                  ['w', x, y + h / 2],
+                ];
+                return handleDefs.map(([id, hx, hy]) => (
+                  <Rect
+                    key={id}
+                    x={hx - hs / 2}
+                    y={hy - hs / 2}
+                    width={hs}
+                    height={hs}
+                    fill="#6dc8e8"
+                    stroke="#1a1a2e"
+                    strokeWidth={1 / state.stageScale}
+                    listening={true}
+                  />
+                ));
+              })()}
             </Group>
           )}
 
@@ -945,6 +1088,48 @@ export default function CanvasStage({ stageRef, onContextMenu, eraseMode, eraseB
           )}
         </Layer>
       </Stage>
+
+      {/* Crop adjust overlay buttons */}
+      {snapshotAdjusting && tempSnapshotRect && (() => {
+        const bx = (tempSnapshotRect.x + tempSnapshotRect.w) * state.stageScale + state.stageX;
+        const by = (tempSnapshotRect.y + tempSnapshotRect.h) * state.stageScale + state.stageY + 10;
+        return (
+          <div
+            style={{
+              position: 'absolute',
+              left: Math.min(bx, size.width - 200),
+              top: Math.min(by, size.height - 48),
+              display: 'flex',
+              gap: 6,
+              zIndex: 20,
+              pointerEvents: 'auto',
+              transform: 'translateX(-100%)',
+            }}
+          >
+            <button
+              className="btn btn-primary"
+              style={{ fontSize: 12, padding: '4px 12px' }}
+              onClick={captureSnapshot}
+            >
+              Capture ↵
+            </button>
+            <button
+              className="btn btn-ghost"
+              style={{ fontSize: 12, padding: '4px 10px' }}
+              onClick={() => {
+                snapshotAdjustingRef.current = false;
+                setSnapshotAdjusting(false);
+                adjustHandleRef.current = null;
+                adjustStartRef.current = null;
+                setSnapshotRect(null);
+                dispatch({ type: 'SET_TOOL', tool: 'select' });
+              }}
+            >
+              Cancel
+            </button>
+          </div>
+        );
+      })()}
     </div>
   );
 }
