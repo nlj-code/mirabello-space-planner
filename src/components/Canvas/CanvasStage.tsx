@@ -42,6 +42,10 @@ export default function CanvasStage({ stageRef, onContextMenu, eraseMode, eraseB
   const lastPosRef = useRef<{ x: number; y: number } | null>(null);
   const [, forceUpdate] = useState(0);
 
+  // ── Ref mirror of state for use in native DOM event handlers (avoids stale closures) ──
+  const stateRef = useRef(state);
+  stateRef.current = state;
+
   // ── Measurement state ──
   const measureStartRef = useRef<{ x: number; y: number } | null>(null);
   const [tempMeasureEnd, setTempMeasureEnd] = useState<{ x: number; y: number } | null>(null);
@@ -67,6 +71,16 @@ export default function CanvasStage({ stageRef, onContextMenu, eraseMode, eraseB
     ro.observe(el);
     setSize({ width: el.clientWidth, height: el.clientHeight });
     return () => ro.disconnect();
+  }, []);
+
+  // Global mouseup/pointerup: clear stuck pan & selection refs if mouse is released outside the canvas
+  useEffect(() => {
+    const onPointerUp = () => {
+      isPanningRef.current = false;
+      lastPosRef.current = null;
+    };
+    window.addEventListener('pointerup', onPointerUp);
+    return () => window.removeEventListener('pointerup', onPointerUp);
   }, []);
 
   // Load floor plan image
@@ -266,53 +280,88 @@ export default function CanvasStage({ stageRef, onContextMenu, eraseMode, eraseB
     return () => window.removeEventListener('keydown', handler);
   }, [state.selectedIds, state.items, state.scale, state.currentTool, state.measurementLines, state.selectedEraseId, dispatch, pushHistory, captureSnapshot]);
 
-  const handleDrop = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    const stg = stageRef.current;
-    if (!stg) return;
+  // ── Native DOM drag-and-drop listeners ──
+  // Using native listeners instead of React synthetic events prevents Konva's
+  // pointer capture and React re-render batching from swallowing drop events.
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
 
-    const data = e.dataTransfer.getData('furniture');
-    if (!data) return;
-
-    const def: FurnitureDefinition = JSON.parse(data);
-    const stageBox = stg.container().getBoundingClientRect();
-    const x = (e.clientX - stageBox.left - state.stageX) / state.stageScale;
-    const y = (e.clientY - stageBox.top - state.stageY) / state.stageScale;
-
-    const ppm = state.scale.pixelsPerMeter;
-    const widthPx = (def.widthCm / 100) * ppm;
-    const heightPx = (def.heightCm / 100) * ppm;
-
-    const snappedX = x - widthPx / 2;
-    const snappedY = y - heightPx / 2;
-
-    const maxZ = state.items.length > 0 ? Math.max(...state.items.map(i => i.zIndex)) : 0;
-
-    const newItem: CanvasItem = {
-      id: uuidv4(),
-      defId: def.id,
-      name: def.name,
-      category: def.category,
-      x: snappedX,
-      y: snappedY,
-      widthPx,
-      heightPx,
-      widthCm: def.widthCm,
-      heightCm: def.heightCm,
-      rotation: 0,
-      fill: getDefaultColor(def.category),
-      opacity: 1,
-      label: '',
-      locked: false,
-      zIndex: maxZ + 1,
-      shape: def.shape,
-      isGroup: def.isGroup || false,
+    const onDragOver = (e: DragEvent) => {
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
     };
 
-    pushHistory();
-    dispatch({ type: 'ADD_ITEM', item: newItem });
-    dispatch({ type: 'SET_SELECTED', ids: [newItem.id] });
-  }, [stageRef, state, dispatch, pushHistory]);
+    const onDragEnter = (e: DragEvent) => {
+      e.preventDefault();
+      // Clear any stuck interaction state so the canvas doesn't fight the drop
+      isPanningRef.current = false;
+      lastPosRef.current = null;
+      selStartRef.current = null;
+    };
+
+    const onDrop = (e: DragEvent) => {
+      e.preventDefault();
+      const stg = stageRef.current;
+      if (!stg) return;
+
+      const data = e.dataTransfer?.getData('furniture');
+      if (!data) return;
+
+      let def: FurnitureDefinition;
+      try { def = JSON.parse(data); }
+      catch { return; }
+
+      // Read latest state from ref to avoid stale closures
+      const s = stateRef.current;
+      const stageBox = stg.container().getBoundingClientRect();
+      const x = (e.clientX - stageBox.left - s.stageX) / s.stageScale;
+      const y = (e.clientY - stageBox.top - s.stageY) / s.stageScale;
+
+      const ppm = s.scale.pixelsPerMeter;
+      const widthPx = (def.widthCm / 100) * ppm;
+      const heightPx = (def.heightCm / 100) * ppm;
+
+      const snappedX = x - widthPx / 2;
+      const snappedY = y - heightPx / 2;
+
+      const maxZ = s.items.length > 0 ? Math.max(...s.items.map(i => i.zIndex)) : 0;
+
+      const newItem: CanvasItem = {
+        id: uuidv4(),
+        defId: def.id,
+        name: def.name,
+        category: def.category,
+        x: snappedX,
+        y: snappedY,
+        widthPx,
+        heightPx,
+        widthCm: def.widthCm,
+        heightCm: def.heightCm,
+        rotation: 0,
+        fill: getDefaultColor(def.category),
+        opacity: 1,
+        label: '',
+        locked: false,
+        zIndex: maxZ + 1,
+        shape: def.shape,
+        isGroup: def.isGroup || false,
+      };
+
+      pushHistory();
+      dispatch({ type: 'ADD_ITEM', item: newItem });
+      dispatch({ type: 'SET_SELECTED', ids: [newItem.id] });
+    };
+
+    el.addEventListener('dragover', onDragOver);
+    el.addEventListener('dragenter', onDragEnter);
+    el.addEventListener('drop', onDrop);
+    return () => {
+      el.removeEventListener('dragover', onDragOver);
+      el.removeEventListener('dragenter', onDragEnter);
+      el.removeEventListener('drop', onDrop);
+    };
+  }, [stageRef, dispatch, pushHistory]);
 
   const handleWheel = useCallback((e: Konva.KonvaEventObject<WheelEvent>) => {
     e.evt.preventDefault();
@@ -816,8 +865,6 @@ export default function CanvasStage({ stageRef, onContextMenu, eraseMode, eraseB
     <div
       ref={containerRef}
       style={{ flex: 1, overflow: 'hidden', background: '#1a1a2e', position: 'relative' }}
-      onDragOver={e => e.preventDefault()}
-      onDrop={handleDrop}
     >
       <Stage
         ref={stageRef as React.RefObject<Konva.Stage>}
