@@ -113,23 +113,15 @@ export default function ScaleModal({ onClose }: Props) {
     dispatch({ type: 'SET_SCALE', scale: newScale });
 
     // Rescale all existing items so their pixel sizes match the new pixelsPerMeter
+    // Use a single SET_ITEMS dispatch to avoid loop-dispatch race condition
     if (state.items.length > 0 && oldPpm !== pixelsPerMeter) {
-      const ratio = pixelsPerMeter / oldPpm;
-      state.items.forEach(item => {
-        const newWidthPx = (item.widthCm / 100) * pixelsPerMeter;
-        const newHeightPx = (item.heightCm / 100) * pixelsPerMeter;
-        // Also reposition relative to old position
-        dispatch({
-          type: 'UPDATE_ITEM',
-          id: item.id,
-          updates: {
-            widthPx: newWidthPx,
-            heightPx: newHeightPx,
-            x: item.x * ratio,
-            y: item.y * ratio,
-          },
-        });
-      });
+      const updatedItems = state.items.map(item => ({
+        ...item,
+        widthPx: (item.widthCm / 100) * pixelsPerMeter,
+        heightPx: (item.heightCm / 100) * pixelsPerMeter,
+        // Keep items in place — only rescale their pixel dimensions, not positions
+      }));
+      dispatch({ type: 'SET_ITEMS', items: updatedItems });
     }
 
     dispatch({ type: 'SET_TOOL', tool: 'select' });

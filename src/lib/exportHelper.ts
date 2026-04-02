@@ -8,11 +8,14 @@ export interface ExportRegion {
   height: number;
 }
 
+export type PdfFormat = 'a3' | 'a4' | 'a2' | 'letter';
+
 export interface ExportOptions {
   projectName: string;
   designerName: string;
   scaleLabel: string;
   region?: ExportRegion;
+  pdfFormat?: PdfFormat;
 }
 
 /** Composite a Konva dataURL onto a white background canvas, returning a new dataURL. */
@@ -95,10 +98,13 @@ export async function exportToPdf(stage: Konva.Stage, opts: ExportOptions): Prom
   stage.scale(oldScale);
   transformers.forEach(t => t.visible(true));
 
-  // A3 landscape: 420 x 297 mm
-  const pdf = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a3' });
-  const pdfW = 420;
-  const pdfH = 297;
+  // Support multiple page formats
+  const format = opts.pdfFormat || 'a3';
+  const formatSizes: Record<string, [number, number]> = {
+    a2: [594, 420], a3: [420, 297], a4: [297, 210], letter: [279, 216],
+  };
+  const [pdfW, pdfH] = formatSizes[format] || formatSizes.a3;
+  const pdf = new jsPDF({ orientation: 'landscape', unit: 'mm', format: format === 'letter' ? 'letter' : format });
 
   // Header area
   const headerH = 20;

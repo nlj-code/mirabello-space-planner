@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import Konva from 'konva';
 import { useApp } from '../../store/AppContext';
-import { exportToPng, exportToPdf, ExportRegion } from '../../lib/exportHelper';
+import { exportToPng, exportToPdf, ExportRegion, PdfFormat } from '../../lib/exportHelper';
 
 interface Props {
   stageRef: React.RefObject<Konva.Stage | null>;
@@ -15,6 +15,7 @@ export default function ExportModal({ stageRef, exportRegion, onClose }: Props) 
   const [designerName, setDesignerName] = useState('');
   const [exporting, setExporting] = useState(false);
   const [nameError, setNameError] = useState(false);
+  const [pdfFormat, setPdfFormat] = useState<PdfFormat>('a3');
 
   const scaleLabel = state.scale.calibrated
     ? `1:${Math.round(100 / state.scale.pixelsPerMeter * 100)} (approx.)`
@@ -38,7 +39,7 @@ export default function ExportModal({ stageRef, exportRegion, onClose }: Props) 
     setNameError(false);
     setExporting(true);
     try {
-      await exportToPdf(stageRef.current, { projectName: projectName.trim(), designerName, scaleLabel, region: exportRegion || undefined });
+      await exportToPdf(stageRef.current, { projectName: projectName.trim(), designerName, scaleLabel, region: exportRegion || undefined, pdfFormat });
     } finally {
       setExporting(false);
     }
@@ -102,6 +103,21 @@ export default function ExportModal({ stageRef, exportRegion, onClose }: Props) 
             </div>
           )}
 
+          <div>
+            <label className="label">PDF Page Size</label>
+            <select
+              className="input"
+              value={pdfFormat}
+              onChange={e => setPdfFormat(e.target.value as PdfFormat)}
+              style={{ width: '100%' }}
+            >
+              <option value="a2">A2 Landscape</option>
+              <option value="a3">A3 Landscape</option>
+              <option value="a4">A4 Landscape</option>
+              <option value="letter">Letter Landscape</option>
+            </select>
+          </div>
+
           <div style={{ display: 'flex', gap: 10 }}>
             <button
               className="btn btn-ghost"
@@ -125,7 +141,7 @@ export default function ExportModal({ stageRef, exportRegion, onClose }: Props) 
                 <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
                 <polyline points="14 2 14 8 20 8" />
               </svg>
-              Export PDF (A3)
+              Export PDF ({pdfFormat.toUpperCase()})
             </button>
           </div>
 

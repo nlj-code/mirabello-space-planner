@@ -115,11 +115,30 @@ function appReducer(state: AppState, action: AppAction): AppState {
       case 'UNGROUP_ITEM': {
         const grp = draft.items.find(i => i.id === action.id);
         if (!grp?.isGroup || !grp.groupItems) break;
-        const ungrouped = grp.groupItems.map((gi, idx) => ({
-          ...gi,
-          id: `${gi.id}-${Date.now()}-${idx}`,
-          x: grp.x + gi.x, y: grp.y + gi.y,
-        }));
+        const grpRot = grp.rotation || 0;
+        const grpFlipH = grp.flipH || false;
+        const grpFlipV = grp.flipV || false;
+        const rad = (grpRot * Math.PI) / 180;
+        const cosA = Math.cos(rad);
+        const sinA = Math.sin(rad);
+        const ungrouped = grp.groupItems.map((gi, idx) => {
+          // Apply group rotation to child position (rotate around group origin)
+          let cx = gi.x;
+          let cy = gi.y;
+          if (grpFlipH) cx = grp.widthPx - cx - gi.widthPx;
+          if (grpFlipV) cy = grp.heightPx - cy - gi.heightPx;
+          const rx = cx * cosA - cy * sinA;
+          const ry = cx * sinA + cy * cosA;
+          return {
+            ...gi,
+            id: `${gi.id}-${Date.now()}-${idx}`,
+            x: grp.x + rx,
+            y: grp.y + ry,
+            rotation: ((gi.rotation || 0) + grpRot) % 360,
+            flipH: grpFlipH ? !gi.flipH : gi.flipH,
+            flipV: grpFlipV ? !gi.flipV : gi.flipV,
+          };
+        });
         draft.items = draft.items.filter(i => i.id !== action.id);
         draft.items.push(...ungrouped);
         draft.selectedIds = ungrouped.map(i => i.id);

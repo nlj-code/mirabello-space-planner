@@ -101,7 +101,9 @@ export default function CanvasStage({ stageRef, onContextMenu, eraseMode, eraseB
   useEffect(() => {
     if (!transformerRef.current || !stageRef.current) return;
     const stage = stageRef.current;
+    const lockedIds = new Set(state.items.filter(i => i.locked).map(i => i.id));
     const nodes = state.selectedIds
+      .filter(id => !lockedIds.has(id))
       .map(id => stage.findOne('#' + id))
       .filter(Boolean) as Konva.Node[];
     transformerRef.current.nodes(nodes);
@@ -123,6 +125,17 @@ export default function CanvasStage({ stageRef, onContextMenu, eraseMode, eraseB
     tempSnapshotRectRef.current = val;
     setTempSnapshotRect(val);
   }, []);
+
+  // Clean up erase temp state when tool changes away from 'erase'
+  useEffect(() => {
+    if (state.currentTool !== 'erase') {
+      eraseDrawingRef.current = false;
+      eraseBrushPointsRef.current = [];
+      eraseRectStartRef.current = null;
+      setTempErasePoints([]);
+      setTempEraseRect(null);
+    }
+  }, [state.currentTool]);
 
   // Clean up snapshot state when tool changes away from 'snapshot'
   useEffect(() => {
@@ -208,6 +221,9 @@ export default function CanvasStage({ stageRef, onContextMenu, eraseMode, eraseB
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      if ((e.target as HTMLElement)?.isContentEditable) return;
+      // Don't fire shortcuts when a modal/dialog overlay is open
+      if (document.querySelector('.modal-overlay')) return;
       const ppm = state.scale.pixelsPerMeter;
       const nudgePx = ppm * 0.01; // 1cm
 
@@ -251,6 +267,7 @@ export default function CanvasStage({ stageRef, onContextMenu, eraseMode, eraseB
       }
       if (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'ArrowUp' || e.key === 'ArrowDown') {
         e.preventDefault();
+        pushHistory();
         state.selectedIds.forEach(id => {
           const item = state.items.find(i => i.id === id);
           if (!item || item.locked) return;
@@ -469,7 +486,7 @@ export default function CanvasStage({ stageRef, onContextMenu, eraseMode, eraseB
       if (snapshotAdjustingRef.current && tempSnapshotRectRef.current) {
         // In adjust phase: check if clicking on a handle or inside rect
         const rect = tempSnapshotRectRef.current;
-        const hs = 12 / state.stageScale; // hit area in canvas units
+        const hs = 12; // constant screen-space hit area (px)
 
         const handles: Record<string, [number, number]> = {
           nw: [rect.x, rect.y],
@@ -709,12 +726,31 @@ export default function CanvasStage({ stageRef, onContextMenu, eraseMode, eraseB
     }
 
     if (selectionRect && selStartRef.current && (selectionRect.w > 5 || selectionRect.h > 5)) {
-      // Select items within rect
+      // Select items within rect — account for rotation by checking if any corner of
+      // the rotated item AABB falls within the selection rect
+      const ir = selectionRect!;
       const selected = state.items
         .filter(item => {
-          const ir = selectionRect!;
-          return item.x < ir.x + ir.w && item.x + item.widthPx > ir.x &&
-            item.y < ir.y + ir.h && item.y + item.heightPx > ir.y;
+          const rot = (item.rotation || 0) * Math.PI / 180;
+          if (Math.abs(rot) < 0.001) {
+            // No rotation: fast AABB check
+            return item.x < ir.x + ir.w && item.x + item.widthPx > ir.x &&
+              item.y < ir.y + ir.h && item.y + item.heightPx > ir.y;
+          }
+          // Compute rotated bounding box corners
+          const cos = Math.cos(rot), sin = Math.sin(rot);
+          const cx = item.x, cy = item.y;
+          const corners = [
+            [0, 0], [item.widthPx, 0], [item.widthPx, item.heightPx], [0, item.heightPx]
+          ].map(([px, py]) => ({
+            x: cx + px * cos - py * sin,
+            y: cy + px * sin + py * cos,
+          }));
+          const minX = Math.min(...corners.map(c => c.x));
+          const maxX = Math.max(...corners.map(c => c.x));
+          const minY = Math.min(...corners.map(c => c.y));
+          const maxY = Math.max(...corners.map(c => c.y));
+          return minX < ir.x + ir.w && maxX > ir.x && minY < ir.y + ir.h && maxY > ir.y;
         })
         .map(i => i.id);
       dispatch({ type: 'SET_SELECTED', ids: selected });
@@ -737,24 +773,30 @@ export default function CanvasStage({ stageRef, onContextMenu, eraseMode, eraseB
   }, [state.selectedIds, state.currentTool, dispatch]);
 
   const handleItemDragEnd = useCallback((id: string, x: number, y: number) => {
+    pushHistory();
     dispatch({ type: 'UPDATE_ITEM', id, updates: { x, y } });
     forceUpdate(n => n + 1);
-  }, [dispatch]);
+  }, [dispatch, pushHistory]);
 
   const handleTransformEnd = useCallback(() => {
     const stage = stageRef.current;
     if (!stage) return;
     // Clear live preview
     window.dispatchEvent(new CustomEvent('transform-preview', { detail: null }));
+    pushHistory();
     state.selectedIds.forEach(id => {
       const node = stage.findOne('#' + id) as Konva.Group;
       if (!node) return;
       const scaleX = node.scaleX();
       const scaleY = node.scaleY();
-      const item = state.items.find(i => i.id === id);
-      if (!item) return;
-      const newW = Math.max(10, item.widthPx * scaleX);
-      const newH = Math.max(10, item.heightPx * scaleY);
+      // Read width/height from the node's data attrs to avoid stale state race condition
+      const baseW = node.getAttr('data-widthPx') as number | undefined;
+      const baseH = node.getAttr('data-heightPx') as number | undefined;
+      const item = baseW != null && baseH != null ? null : state.items.find(i => i.id === id);
+      const widthPx = baseW ?? item?.widthPx ?? 10;
+      const heightPx = baseH ?? item?.heightPx ?? 10;
+      const newW = Math.max(10, widthPx * scaleX);
+      const newH = Math.max(10, heightPx * scaleY);
       const ppm = state.scale.pixelsPerMeter;
       node.scaleX(1);
       node.scaleY(1);
@@ -768,7 +810,7 @@ export default function CanvasStage({ stageRef, onContextMenu, eraseMode, eraseB
         }
       });
     });
-  }, [stageRef, state.selectedIds, state.items, state.scale, dispatch]);
+  }, [stageRef, state.selectedIds, state.items, state.scale, dispatch, pushHistory]);
 
   const handleContextMenu = useCallback((e: any, id: string) => {
     e.evt.preventDefault();
@@ -794,9 +836,10 @@ export default function CanvasStage({ stageRef, onContextMenu, eraseMode, eraseB
     const tickLen = 8 * invScale;
     // Midpoint for label
     const mx = (sx + ex) / 2, my = (sy + ey) / 2;
-    // Offset label perpendicular to line
-    const labelOffX = nx * 14 * invScale;
-    const labelOffY = ny * 14 * invScale;
+    // Offset label perpendicular to line — clamp so it doesn't drift at extreme zoom
+    const clampedInvScale = Math.min(Math.max(invScale, 0.5), 4);
+    const labelOffX = nx * 14 * clampedInvScale;
+    const labelOffY = ny * 14 * clampedInvScale;
 
     return (
       <Group key={key} listening={false}>
@@ -893,9 +936,9 @@ export default function CanvasStage({ stageRef, onContextMenu, eraseMode, eraseB
           )}
         </Layer>
 
-        {/* Erase layer — between floor plan and items */}
+        {/* Items layer (erase strokes render here too, in the same compositing context) */}
         <Layer>
-          {/* Saved erase strokes */}
+          {/* Erase strokes — rendered in same layer as items so they composite correctly */}
           {state.eraseStrokes.map(s => {
             const isSelected = s.id === state.selectedEraseId;
             const isEraseActive = state.currentTool === 'erase';
@@ -984,10 +1027,7 @@ export default function CanvasStage({ stageRef, onContextMenu, eraseMode, eraseB
               listening={false}
             />
           )}
-        </Layer>
 
-        {/* Items layer */}
-        <Layer>
           {sortedItems.map(item => (
             <FurnitureShape
               key={item.id}
@@ -1103,10 +1143,12 @@ export default function CanvasStage({ stageRef, onContextMenu, eraseMode, eraseB
               state.selectedIds.forEach(id => {
                 const node = stage.findOne('#' + id) as Konva.Group;
                 if (!node) return;
-                const item = state.items.find(i => i.id === id);
-                if (!item) return;
-                const newWPx = Math.max(10, item.widthPx * node.scaleX());
-                const newHPx = Math.max(10, item.heightPx * node.scaleY());
+                // Read base dimensions from node attrs (set by FurnitureShape) to avoid stale state
+                const baseW = (node.getAttr('data-widthPx') as number | undefined);
+                const baseH = (node.getAttr('data-heightPx') as number | undefined);
+                if (baseW == null || baseH == null) return;
+                const newWPx = Math.max(10, baseW * node.scaleX());
+                const newHPx = Math.max(10, baseH * node.scaleY());
                 const p = state.scale.pixelsPerMeter;
                 window.dispatchEvent(new CustomEvent('transform-preview', {
                   detail: { widthCm: (newWPx / p) * 100, heightCm: (newHPx / p) * 100 },
@@ -1114,6 +1156,7 @@ export default function CanvasStage({ stageRef, onContextMenu, eraseMode, eraseB
               });
             }}
             rotationSnaps={[0, 45, 90, 135, 180, 225, 270, 315]}
+            rotationSnapTolerance={5}
             keepRatio={false}
           />
         </Layer>

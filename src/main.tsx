@@ -4,14 +4,17 @@ import './index.css'
 import App from './App.tsx'
 import { AppProvider } from './store/AppContext.tsx'
 import PasswordGate, { isAuthenticated } from './components/PasswordGate.tsx'
+import ErrorBoundary from './components/ErrorBoundary.tsx'
 
 function Root() {
   const [authed, setAuthed] = useState(isAuthenticated);
   if (!authed) return <PasswordGate onAuth={() => setAuthed(true)} />;
   return (
-    <AppProvider>
-      <App />
-    </AppProvider>
+    <ErrorBoundary>
+      <AppProvider>
+        <App />
+      </AppProvider>
+    </ErrorBoundary>
   );
 }
 

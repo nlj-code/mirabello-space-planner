@@ -605,11 +605,12 @@ export default function FurniturePreview({ def }: Props) {
     );
   }
 
-  // Generic fallback
+  // Generic fallback for unknown furniture IDs
   return (
     <svg width={S} height={S}>
       <rect x={ox} y={oy} width={w} height={h} fill={BG} stroke={ST} strokeWidth={1} rx={1} />
       <rect x={ox + 3} y={oy + 3} width={Math.max(1, w - 6)} height={Math.max(1, h - 6)} fill="none" stroke={ST2} strokeWidth={0.4} />
+      <text x={cx} y={cy + 3} textAnchor="middle" fontSize={8} fill={ST2}>{def.name.charAt(0)}</text>
     </svg>
   );
 }

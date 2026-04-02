@@ -127,6 +127,7 @@ export default function Sidebar({ collapsed, onToggle }: Props) {
                     className="furniture-item"
                     draggable
                     onDragStart={e => handleDragStart(e, def)}
+                    style={{ cursor: 'grab' }}
                   >
                     <div style={{ width: 34, height: 34, flexShrink: 0 }}>
                       <FurniturePreview def={def} />

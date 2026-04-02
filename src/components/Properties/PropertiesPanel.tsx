@@ -40,6 +40,13 @@ export default function PropertiesPanel() {
       setLocalRot(item.rotation.toFixed(1));
       setLocalLabel(item.label);
       setLocalOpacity(Math.round(item.opacity * 100));
+    } else {
+      // Reset local state when no single item is selected (e.g. multi-select or deselect)
+      setLocalW('');
+      setLocalH('');
+      setLocalRot('');
+      setLocalLabel('');
+      setLocalOpacity(100);
     }
   }, [item?.id, item?.widthCm, item?.heightCm, item?.rotation, item?.label, item?.opacity]);
 

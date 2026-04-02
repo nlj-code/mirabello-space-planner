@@ -60,7 +60,21 @@ export default function App() {
         };
         saveProject(project);
       } else {
-        // Unnamed project — prompt the user to name it (first save only)
+        // Unnamed project — silently persist as draft so work isn't lost
+        const draftProject = {
+          id: 'draft-autosave',
+          name: 'Untitled Draft',
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          floorPlan: state.floorPlan,
+          scale: state.scale,
+          items: state.items,
+          stageX: state.stageX,
+          stageY: state.stageY,
+          stageScale: state.stageScale,
+        };
+        saveProject(draftProject);
+        // Also prompt to name it (first time only)
         setShowAutoSavePrompt(true);
       }
     }, 300000);
@@ -89,6 +103,8 @@ export default function App() {
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      if ((e.target as HTMLElement)?.isContentEditable) return;
+      if (document.querySelector('.modal-overlay')) return;
       if ((e.metaKey || e.ctrlKey) && e.key === 'z' && !e.shiftKey) {
         e.preventDefault();
         // Handled in context

@@ -1633,7 +1633,7 @@ function ShapeContent({ item }: { item: CanvasItem }) {
 
 // ─── MAIN EXPORT ─────────────────────────────────────────────────────────────
 
-export default function FurnitureShape({
+function FurnitureShapeInner({
   item, isSelected, onSelect, onDragStart, onDragEnd, onContextMenu, draggable, showDimensions
 }: Props) {
   // Load image for pasted screenshot items
@@ -1677,6 +1677,8 @@ export default function FurnitureShape({
       onDragStart={onDragStart}
       onDragEnd={e => onDragEnd(e.target.x(), e.target.y())}
       onContextMenu={onContextMenu}
+      data-widthPx={item.widthPx}
+      data-heightPx={item.heightPx}
     >
       {/* Inner group applies flip transform to visual content only */}
       <Group
@@ -1797,3 +1799,6 @@ export default function FurnitureShape({
     </Group>
   );
 }
+
+const FurnitureShape = React.memo(FurnitureShapeInner);
+export default FurnitureShape;
