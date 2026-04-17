@@ -46,6 +46,10 @@ export default function CanvasStage({ stageRef, onContextMenu, eraseMode, eraseB
   const stateRef = useRef(state);
   stateRef.current = state;
 
+  // ── Stable ref for pushHistory so DnD listeners don't re-register on every item change ──
+  const pushHistoryRef = useRef(pushHistory);
+  pushHistoryRef.current = pushHistory;
+
   // ── Measurement state ──
   const measureStartRef = useRef<{ x: number; y: number } | null>(null);
   const [tempMeasureEnd, setTempMeasureEnd] = useState<{ x: number; y: number } | null>(null);
@@ -73,11 +77,18 @@ export default function CanvasStage({ stageRef, onContextMenu, eraseMode, eraseB
     return () => ro.disconnect();
   }, []);
 
-  // Global mouseup/pointerup: clear stuck pan & selection refs if mouse is released outside the canvas
+  // Global mouseup/pointerup: clear all stuck interaction state if mouse is released outside the canvas
   useEffect(() => {
     const onPointerUp = () => {
       isPanningRef.current = false;
       lastPosRef.current = null;
+      // If selStartRef is stuck (released outside canvas), clear it so subsequent
+      // handleMouseMove calls don't fire setSelectionRect and re-render during item drags,
+      // which would reset Konva node positions mid-drag and break dragging.
+      if (selStartRef.current) {
+        selStartRef.current = null;
+        setSelectionRect(null);
+      }
     };
     window.addEventListener('pointerup', onPointerUp);
     return () => window.removeEventListener('pointerup', onPointerUp);
@@ -314,7 +325,10 @@ export default function CanvasStage({ stageRef, onContextMenu, eraseMode, eraseB
       // Clear any stuck interaction state so the canvas doesn't fight the drop
       isPanningRef.current = false;
       lastPosRef.current = null;
-      selStartRef.current = null;
+      if (selStartRef.current) {
+        selStartRef.current = null;
+        setSelectionRect(null);
+      }
     };
 
     const onDrop = (e: DragEvent) => {
@@ -365,7 +379,7 @@ export default function CanvasStage({ stageRef, onContextMenu, eraseMode, eraseB
         isGroup: def.isGroup || false,
       };
 
-      pushHistory();
+      pushHistoryRef.current();
       dispatch({ type: 'ADD_ITEM', item: newItem });
       dispatch({ type: 'SET_SELECTED', ids: [newItem.id] });
     };
@@ -378,7 +392,7 @@ export default function CanvasStage({ stageRef, onContextMenu, eraseMode, eraseB
       el.removeEventListener('dragenter', onDragEnter);
       el.removeEventListener('drop', onDrop);
     };
-  }, [stageRef, dispatch, pushHistory]);
+  }, [stageRef, dispatch]);
 
   const handleWheel = useCallback((e: Konva.KonvaEventObject<WheelEvent>) => {
     e.evt.preventDefault();
