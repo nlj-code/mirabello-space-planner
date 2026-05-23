@@ -6,12 +6,21 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
   import.meta.url,
 ).toString();
 
+const MAX_CANVAS_DIMENSION = 8000;
+
 export async function renderPdfToBase64(file: File): Promise<{ dataUrl: string; width: number; height: number }> {
   const arrayBuffer = await file.arrayBuffer();
   const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
   const page = await pdf.getPage(1);
 
-  const viewport = page.getViewport({ scale: 2.0 });
+  const baseViewport = page.getViewport({ scale: 1 });
+  const desiredScale = 2.0;
+  const longestSide = Math.max(baseViewport.width, baseViewport.height) * desiredScale;
+  const scale = longestSide > MAX_CANVAS_DIMENSION
+    ? (MAX_CANVAS_DIMENSION / Math.max(baseViewport.width, baseViewport.height))
+    : desiredScale;
+
+  const viewport = page.getViewport({ scale });
   const canvas = document.createElement('canvas');
   canvas.width = viewport.width;
   canvas.height = viewport.height;
@@ -20,7 +29,7 @@ export async function renderPdfToBase64(file: File): Promise<{ dataUrl: string; 
   await page.render({ canvasContext: ctx, viewport }).promise;
 
   return {
-    dataUrl: canvas.toDataURL('image/png'),
+    dataUrl: canvas.toDataURL('image/jpeg', 0.85),
     width: viewport.width,
     height: viewport.height,
   };

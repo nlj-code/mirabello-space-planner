@@ -50,18 +50,26 @@ export default function ProjectModal({ onClose }: Props) {
       stageY: state.stageY,
       stageScale: state.stageScale,
     };
-    saveProject(project);
-    setProjects(getAllProjects());
-    setNewName('');
-    dispatch({ type: 'LOAD_PROJECT', project });
+    try {
+      saveProject(project);
+      setProjects(getAllProjects());
+      setNewName('');
+      dispatch({ type: 'LOAD_PROJECT', project });
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Failed to save project.');
+    }
   };
 
   const handleSaveCurrent = () => {
     const proj = getCurrentProject();
-    saveProject(proj);
-    setProjects(getAllProjects());
-    dispatch({ type: 'LOAD_PROJECT', project: proj });
-    alert('Project saved!');
+    try {
+      saveProject(proj);
+      setProjects(getAllProjects());
+      dispatch({ type: 'LOAD_PROJECT', project: proj });
+      alert('Project saved!');
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Failed to save project.');
+    }
   };
 
   const handleLoad = (project: Project) => {
@@ -100,8 +108,9 @@ export default function ProjectModal({ onClose }: Props) {
       saveProject(project);
       setProjects(getAllProjects());
       alert(`Project "${project.name}" imported successfully!`);
-    } catch {
-      alert('Failed to import project. Invalid file format.');
+    } catch (err) {
+      console.error('Import failed:', err);
+      alert(err instanceof Error ? err.message : 'Failed to import project. Invalid file format.');
     }
     e.target.value = '';
   };

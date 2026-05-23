@@ -11,6 +11,27 @@ export function getAllProjects(): Project[] {
   }
 }
 
+function isQuotaError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  return err.name === 'QuotaExceededError'
+    || err.name === 'NS_ERROR_DOM_QUOTA_REACHED'
+    || /quota/i.test(err.message);
+}
+
+function writeProjects(projects: Project[]): void {
+  try {
+    localStorage.setItem(PROJECTS_KEY, JSON.stringify(projects));
+  } catch (err) {
+    console.error('Failed to write projects to localStorage:', err);
+    if (isQuotaError(err)) {
+      throw new Error(
+        'Browser storage is full. Please delete an old project (or export it as JSON) and try again.'
+      );
+    }
+    throw new Error('Failed to save: your browser blocked storage access.');
+  }
+}
+
 export function saveProject(project: Project): void {
   const projects = getAllProjects();
   const idx = projects.findIndex(p => p.id === project.id);
@@ -20,18 +41,18 @@ export function saveProject(project: Project): void {
   } else {
     projects.push(updated);
   }
-  localStorage.setItem(PROJECTS_KEY, JSON.stringify(projects));
+  writeProjects(projects);
 }
 
 export function deleteProject(id: string): void {
   const projects = getAllProjects().filter(p => p.id !== id);
-  localStorage.setItem(PROJECTS_KEY, JSON.stringify(projects));
+  writeProjects(projects);
 }
 
 /** One-time cleanup: removes all entries named 'Auto-save'. */
 export function purgeAutoSaves(): void {
   const projects = getAllProjects().filter(p => p.name !== 'Auto-save');
-  localStorage.setItem(PROJECTS_KEY, JSON.stringify(projects));
+  writeProjects(projects);
 }
 
 export function exportProjectJson(project: Project): void {

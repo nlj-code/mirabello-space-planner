@@ -88,8 +88,11 @@ export default function Toolbar({
     const file = e.target.files?.[0];
     if (!file) return;
     try {
+      const isPdf = file.type === 'application/pdf'
+        || file.type === 'application/x-pdf'
+        || file.name.toLowerCase().endsWith('.pdf');
       let result: { dataUrl: string; width: number; height: number };
-      if (file.type === 'application/pdf') {
+      if (isPdf) {
         result = await renderPdfToBase64(file);
       } else {
         result = await readImageFile(file);
@@ -103,6 +106,7 @@ export default function Toolbar({
       // Prompt to calibrate
       onOpenScaleModal();
     } catch (err) {
+      console.error('File upload failed:', err);
       alert('Failed to load file. Please use PDF, JPG, or PNG.');
     }
     e.target.value = '';

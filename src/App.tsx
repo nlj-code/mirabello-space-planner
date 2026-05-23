@@ -34,6 +34,9 @@ export default function App() {
   const [eraseBrushSize, setEraseBrushSize] = useState(20);
   const [exportRegion, setExportRegion] = useState<ExportRegion | null>(null);
   const [showAutoSavePrompt, setShowAutoSavePrompt] = useState(false);
+  const autoSavePromptDismissedRef = useRef(false);
+  const stateRef = useRef(state);
+  stateRef.current = state;
   const previousToolRef = useRef<Tool>('select');
 
   // One-time cleanup: remove legacy duplicate Auto-save entries on startup
@@ -42,44 +45,50 @@ export default function App() {
   // Auto-save every 5 minutes
   useEffect(() => {
     const interval = setInterval(() => {
-      if (state.items.length === 0) return; // nothing to save
+      const s = stateRef.current;
+      if (s.items.length === 0) return; // nothing to save
 
-      if (state.currentProject) {
-        // Named project — save silently in the background
-        const project = {
-          id: state.currentProject.id,
-          name: state.currentProject.name,
-          createdAt: state.currentProject.createdAt,
-          updatedAt: new Date().toISOString(),
-          floorPlan: state.floorPlan,
-          scale: state.scale,
-          items: state.items,
-          stageX: state.stageX,
-          stageY: state.stageY,
-          stageScale: state.stageScale,
-        };
-        saveProject(project);
-      } else {
-        // Unnamed project — silently persist as draft so work isn't lost
-        const draftProject = {
-          id: 'draft-autosave',
-          name: 'Untitled Draft',
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-          floorPlan: state.floorPlan,
-          scale: state.scale,
-          items: state.items,
-          stageX: state.stageX,
-          stageY: state.stageY,
-          stageScale: state.stageScale,
-        };
-        saveProject(draftProject);
-        // Also prompt to name it (first time only)
-        setShowAutoSavePrompt(true);
+      try {
+        if (s.currentProject) {
+          // Named project — save silently in the background
+          saveProject({
+            id: s.currentProject.id,
+            name: s.currentProject.name,
+            createdAt: s.currentProject.createdAt,
+            updatedAt: new Date().toISOString(),
+            floorPlan: s.floorPlan,
+            scale: s.scale,
+            items: s.items,
+            stageX: s.stageX,
+            stageY: s.stageY,
+            stageScale: s.stageScale,
+          });
+        } else {
+          // Unnamed project — silently persist as draft so work isn't lost
+          saveProject({
+            id: 'draft-autosave',
+            name: 'Untitled Draft',
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+            floorPlan: s.floorPlan,
+            scale: s.scale,
+            items: s.items,
+            stageX: s.stageX,
+            stageY: s.stageY,
+            stageScale: s.stageScale,
+          });
+          // Prompt to name it, but only once per session
+          if (!autoSavePromptDismissedRef.current) {
+            setShowAutoSavePrompt(true);
+          }
+        }
+      } catch (err) {
+        console.error('Auto-save failed:', err);
+        alert(err instanceof Error ? err.message : 'Auto-save failed.');
       }
     }, 300000);
     return () => clearInterval(interval);
-  }, [state]);
+  }, []);
 
   const handleAutoSaveNamed = useCallback((name: string) => {
     const project = {
@@ -94,8 +103,12 @@ export default function App() {
       stageY: state.stageY,
       stageScale: state.stageScale,
     };
-    saveProject(project);
-    dispatch({ type: 'LOAD_PROJECT', project });
+    try {
+      saveProject(project);
+      dispatch({ type: 'LOAD_PROJECT', project });
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Failed to save project.');
+    }
     setShowAutoSavePrompt(false);
   }, [state, dispatch]);
 
@@ -232,7 +245,10 @@ export default function App() {
       {showAutoSavePrompt && (
         <AutoSaveNameModal
           onSave={handleAutoSaveNamed}
-          onSkip={() => setShowAutoSavePrompt(false)}
+          onSkip={() => {
+            autoSavePromptDismissedRef.current = true;
+            setShowAutoSavePrompt(false);
+          }}
         />
       )}
       {showExportModal && (
