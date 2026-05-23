@@ -259,23 +259,6 @@ export default function Toolbar({
         </>
       )}
 
-      {/* Export area selection mode indicator */}
-      {state.currentTool === 'export' && (
-        <>
-          <div className="toolbar-divider" />
-          <span style={{ fontSize: 12, color: 'var(--accent)', fontWeight: 600 }}>
-            Drag to select export area
-          </span>
-          <button
-            className="btn btn-ghost"
-            style={{ fontSize: 10, padding: '3px 8px' }}
-            onClick={() => dispatch({ type: 'SET_TOOL', tool: 'select' })}
-          >
-            Cancel (Esc)
-          </button>
-        </>
-      )}
-
       <div className="toolbar-divider" />
 
       <button

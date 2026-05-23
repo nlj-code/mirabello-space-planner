@@ -34,10 +34,31 @@ export default function App() {
   const [eraseBrushSize, setEraseBrushSize] = useState(20);
   const [exportRegion, setExportRegion] = useState<ExportRegion | null>(null);
   const [showAutoSavePrompt, setShowAutoSavePrompt] = useState(false);
+  const [exportNoticeHidden, setExportNoticeHidden] = useState(false);
+  const exportNoticeCardRef = useRef<HTMLDivElement>(null);
   const autoSavePromptDismissedRef = useRef(false);
   const stateRef = useRef(state);
   stateRef.current = state;
   const previousToolRef = useRef<Tool>('select');
+
+  // Reset export notice visibility whenever export mode is (re-)entered
+  useEffect(() => {
+    if (state.currentTool === 'export') {
+      setExportNoticeHidden(false);
+    }
+  }, [state.currentTool]);
+
+  // Fade the export notice the moment the user begins dragging on the canvas
+  useEffect(() => {
+    if (state.currentTool !== 'export' || exportNoticeHidden) return;
+    const onPointerDown = (e: PointerEvent) => {
+      const target = e.target as Node | null;
+      if (target && exportNoticeCardRef.current?.contains(target)) return;
+      setExportNoticeHidden(true);
+    };
+    window.addEventListener('pointerdown', onPointerDown);
+    return () => window.removeEventListener('pointerdown', onPointerDown);
+  }, [state.currentTool, exportNoticeHidden]);
 
   // One-time cleanup: remove legacy duplicate Auto-save entries on startup
   useEffect(() => { purgeAutoSaves(); }, []);
@@ -257,6 +278,50 @@ export default function App() {
           exportRegion={exportRegion}
           onClose={() => { setShowExportModal(false); setExportRegion(null); }}
         />
+      )}
+
+      {/* Export-area selection notice (non-blocking; fades out once user begins dragging) */}
+      {state.currentTool === 'export' && (
+        <div style={{
+          position: 'fixed',
+          left: '50%', top: '50%',
+          transform: 'translate(-50%, -50%)',
+          pointerEvents: 'none',
+          zIndex: 1000,
+          opacity: exportNoticeHidden ? 0 : 1,
+          transition: 'opacity 0.2s ease',
+        }}>
+          <div
+            ref={exportNoticeCardRef}
+            style={{
+              pointerEvents: exportNoticeHidden ? 'none' : 'auto',
+              background: 'rgba(22,33,62,0.96)',
+              border: '1px solid rgba(232,184,109,0.5)',
+              borderRadius: 10,
+              padding: '18px 24px',
+              boxShadow: '0 12px 40px rgba(0,0,0,0.6)',
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              gap: 12,
+              minWidth: 280,
+            }}
+          >
+            <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--accent)' }}>
+              Drag to select export area
+            </div>
+            <div style={{ fontSize: 12, color: 'var(--text-secondary)', textAlign: 'center' }}>
+              Click and drag on the canvas to define the region you want to export.
+            </div>
+            <button
+              className="btn btn-ghost"
+              style={{ fontSize: 11 }}
+              onClick={() => dispatch({ type: 'SET_TOOL', tool: 'select' })}
+            >
+              Cancel (Esc)
+            </button>
+          </div>
+        </div>
       )}
 
       {/* Context menu */}
