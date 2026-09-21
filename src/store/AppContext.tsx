@@ -1,6 +1,7 @@
-import React, { createContext, useContext, useReducer, useRef, useCallback } from 'react';
+import React, { createContext, useContext, useReducer, useRef, useCallback, useMemo, useState } from 'react';
 import { AppState, AppAction, CanvasItem, Tool, ScaleCalibration, Project } from '../types';
 import { produce } from 'immer';
+import { HISTORY_LIMIT } from '../config/constants';
 
 const initialScale: ScaleCalibration = {
   pixelsPerMeter: 100,
@@ -20,6 +21,9 @@ const initialState: AppState = {
   stageScale: 1,
   snapToObjects: true,
   showDimensions: false,
+  // FIX #5.1 / #5.2 (code quality audit): grid + snap toggles default off.
+  showGrid: false,
+  snapToGrid: false,
   currentProject: null,
   measurementLines: [],
   eraseStrokes: [],
@@ -78,6 +82,13 @@ function appReducer(state: AppState, action: AppAction): AppState {
         break;
       case 'TOGGLE_DIMENSIONS':
         draft.showDimensions = !draft.showDimensions;
+        break;
+      // FIX #5.1 / #5.2 (code quality audit)
+      case 'TOGGLE_GRID':
+        draft.showGrid = !draft.showGrid;
+        break;
+      case 'TOGGLE_SNAP_GRID':
+        draft.snapToGrid = !draft.snapToGrid;
         break;
       case 'SET_ITEMS':
         draft.items = action.items;
@@ -254,6 +265,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const historyRef = useRef<CanvasItem[][]>([]);
   const futureRef = useRef<CanvasItem[][]>([]);
 
+  // FIX #1.9 (code quality audit): canUndo/canRedo were previously read from
+  // historyRef.current.length AT RENDER TIME, which is not reactive — Toolbar
+  // buttons stayed stale between events. Promote to real state that push/
+  // undo/redo update.
+  const [canUndo, setCanUndo] = useState(false);
+  const [canRedo, setCanRedo] = useState(false);
+
   // FIX #7 (drag/drop audit): give pushHistory/undo/redo stable identities by
   // reading state.items through a ref instead of a closure dep. Previously,
   // depending on state.items re-created these callbacks on every mutation,
@@ -284,8 +302,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       ...historyRef.current,
       stripImageData(itemsRef.current).map(i => ({ ...i })),
     ];
-    if (historyRef.current.length > 50) historyRef.current.shift();
+    // FIX #4.4 (code quality audit): named constant
+    if (historyRef.current.length > HISTORY_LIMIT) historyRef.current.shift();
     futureRef.current = [];
+    // FIX #1.9
+    setCanUndo(true);
+    setCanRedo(false);
   }, []);
 
   const undo = useCallback(() => {
@@ -295,6 +317,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     const prev = historyRef.current[historyRef.current.length - 1];
     historyRef.current = historyRef.current.slice(0, -1);
     dispatch({ type: 'SET_ITEMS', items: restoreImageData(prev) });
+    // FIX #1.9
+    setCanUndo(historyRef.current.length > 0);
+    setCanRedo(true);
   }, []);
 
   const redo = useCallback(() => {
@@ -304,6 +329,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     const next = futureRef.current[0];
     futureRef.current = futureRef.current.slice(1);
     dispatch({ type: 'SET_ITEMS', items: restoreImageData(next) });
+    // FIX #1.9
+    setCanUndo(true);
+    setCanRedo(futureRef.current.length > 0);
   }, []);
 
   // FIX #7.3d (project storage audit): clear both history stacks and the
@@ -313,6 +341,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     historyRef.current = [];
     futureRef.current = [];
     imageDataRef.current = new Map();
+    // FIX #1.9
+    setCanUndo(false);
+    setCanRedo(false);
   }, []);
 
   // FIX #7.3d + #7.4c (project storage audit): high-level loaders that always
@@ -327,15 +358,17 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     dispatch({ type: 'RESET_STATE' });
   }, [clearHistory]);
 
+  // FIX #1.8 (code quality audit): memoize the context value so consumers
+  // whose deps didn't actually change stop re-rendering on every dispatch.
+  const contextValue = useMemo(() => ({
+    state, dispatch, undo, redo,
+    canUndo, canRedo,
+    pushHistory,
+    loadProject, newProject, clearHistory,
+  }), [state, undo, redo, canUndo, canRedo, pushHistory, loadProject, newProject, clearHistory]);
+
   return (
-    <AppContext.Provider value={{
-      state, dispatch, undo, redo,
-      canUndo: historyRef.current.length > 0,
-      canRedo: futureRef.current.length > 0,
-      pushHistory,
-      // FIX #7.3d + #7.4c
-      loadProject, newProject, clearHistory,
-    }}>
+    <AppContext.Provider value={contextValue}>
       {children}
     </AppContext.Provider>
   );

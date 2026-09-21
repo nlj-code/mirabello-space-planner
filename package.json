@@ -15,7 +15,7 @@
     "autoprefixer": "^10.4.24",
     "html2canvas": "^1.4.1",
     "immer": "^11.1.4",
-    "jspdf": "^4.2.0",
+    "jspdf": "^4.2.1",
     "konva": "^10.2.0",
     "pdfjs-dist": "^4.4.168",
     "postcss": "^8.5.6",
@@ -23,7 +23,7 @@
     "react-dom": "^19.2.0",
     "react-konva": "^19.2.2",
     "tailwindcss": "^4.2.0",
-    "uuid": "^13.0.0"
+    "uuid": "^11.1.1"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",

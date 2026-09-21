@@ -1,11 +1,21 @@
 import Konva from 'konva';
 import jsPDF from 'jspdf';
+import { EXPORT_PIXEL_RATIO } from '../config/constants';
 
 export interface ExportRegion {
   x: number;
   y: number;
   width: number;
   height: number;
+}
+
+// FIX #6.4 (code quality audit): whitelist filename characters so a
+// project name containing '/', '\\', ':', etc. can't produce a weird
+// path when saved. Browsers already strip path chars from downloads,
+// but this makes the resulting filename predictable and safe on every OS.
+function safeFilename(name: string): string {
+  const cleaned = name.replace(/[^A-Za-z0-9 _.-]/g, '_').replace(/\s+/g, '_');
+  return cleaned || 'floorplan';
 }
 
 export type PdfFormat = 'a3' | 'a4' | 'a2' | 'letter';
@@ -45,7 +55,8 @@ export async function exportToPng(stage: Konva.Stage, _opts: ExportOptions): Pro
   const transformers = stage.find('Transformer');
   transformers.forEach(t => t.visible(false));
 
-  const pixelRatio = 2;
+  // FIX #4.4 (code quality audit): constant
+  const pixelRatio = EXPORT_PIXEL_RATIO;
   const toDataUrlOpts: any = { pixelRatio };
   const imgW = _opts.region ? _opts.region.width : stage.width();
   const imgH = _opts.region ? _opts.region.height : stage.height();
@@ -67,7 +78,8 @@ export async function exportToPng(stage: Konva.Stage, _opts: ExportOptions): Pro
 
   const a = document.createElement('a');
   a.href = dataUrl;
-  a.download = `${(_opts.projectName || 'floorplan').replace(/\s+/g, '_')}.png`;
+  // FIX #6.4 (code quality audit): sanitised filename
+  a.download = `${safeFilename(_opts.projectName)}.png`;
   a.click();
 }
 
@@ -82,7 +94,8 @@ export async function exportToPdf(stage: Konva.Stage, opts: ExportOptions): Prom
   const transformers = stage.find('Transformer');
   transformers.forEach(t => t.visible(false));
 
-  const toDataUrlOpts: any = { pixelRatio: 2 };
+  // FIX #4.4 (code quality audit)
+  const toDataUrlOpts: any = { pixelRatio: EXPORT_PIXEL_RATIO };
   if (opts.region) {
     toDataUrlOpts.x = opts.region.x;
     toDataUrlOpts.y = opts.region.y;
@@ -179,5 +192,6 @@ export async function exportToPdf(stage: Konva.Stage, opts: ExportOptions): Prom
   pdf.setFontSize(7);
   pdf.text(opts.scaleLabel, 10, barY + 5);
 
-  pdf.save(`${(opts.projectName || 'floorplan').replace(/\s+/g, '_')}.pdf`);
+  // FIX #6.4 (code quality audit)
+  pdf.save(`${safeFilename(opts.projectName)}.pdf`);
 }

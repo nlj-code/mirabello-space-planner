@@ -21,9 +21,17 @@ import {
   clearLastCorruptionReport,
   getAllProjects,
 } from './lib/projectStorage';
+import { buildProjectSnapshot } from './lib/projectSnapshot';
 import { ExportRegion } from './lib/exportHelper';
 import { Tool, Project } from './types';
 import { v4 as uuidv4 } from 'uuid';
+import {
+  AUTOSAVE_INTERVAL_MS,
+  BUTTON_ZOOM_FACTOR,
+  ZOOM_MIN, ZOOM_MAX,
+  ZOOM_FIT_PADDING_PX,
+} from './config/constants';
+import ShortcutHelpModal from './components/Modals/ShortcutHelpModal';
 
 interface CtxMenu {
   x: number;
@@ -32,7 +40,7 @@ interface CtxMenu {
 }
 
 export default function App() {
-  const { state, dispatch, loadProject, newProject } = useApp();
+  const { state, dispatch, loadProject, newProject, undo, redo } = useApp();
   const stageRef = useRef<Konva.Stage>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [showScaleModal, setShowScaleModal] = useState(false);
@@ -61,6 +69,13 @@ export default function App() {
   // still recoverable.
   const [recoveryDraft, setRecoveryDraft] = useState<Project | null>(null);
   const [corruptionMsg, setCorruptionMsg] = useState<string | null>(null);
+
+  // FIX #3.2 (code quality audit): visible "last saved" indicator so the
+  // designer can tell auto-save is alive without opening the Projects modal.
+  const [lastAutoSaveAt, setLastAutoSaveAt] = useState<number | null>(null);
+
+  // FIX #3.8 (code quality audit): shortcut cheat-sheet.
+  const [showShortcutHelp, setShowShortcutHelp] = useState(false);
 
   // Reset export notice visibility whenever export mode is (re-)entered
   useEffect(() => {
@@ -104,12 +119,13 @@ export default function App() {
     }
   }, []);
 
-  // Auto-save every 5 minutes
+  // FIX #5.5 (code quality audit): auto-save every 30 seconds (spec compliance;
+  // was 5 minutes — up to 5 min of work could be lost between saves).
   useEffect(() => {
     // FIX #2 (drag/drop audit): if a quota-exceeded (or other) failure
     // happens, DO NOT call the blocking alert() — it froze the event loop
     // and could cancel any in-flight HTML5 drag. Also stop retrying once we
-    // hit a persistent quota error to avoid a fresh failure every 5 min.
+    // hit a persistent quota error to avoid a fresh failure every N s.
     // FIX #7.2a (project storage audit): also surface a non-blocking banner
     // so the user KNOWS auto-save has stopped and can save manually / export.
     let quotaHit = false;
@@ -119,64 +135,39 @@ export default function App() {
       if (s.items.length === 0) return; // nothing to save
 
       try {
+        // FIX #4.6 (code quality audit): single snapshot builder instead of
+        // duplicated Project literals in every save site.
         if (s.currentProject) {
-          // Named project — save silently in the background
-          saveProject({
+          saveProject(buildProjectSnapshot(s, {
             id: s.currentProject.id,
             name: s.currentProject.name,
             createdAt: s.currentProject.createdAt,
-            updatedAt: new Date().toISOString(),
-            floorPlan: s.floorPlan,
-            scale: s.scale,
-            items: s.items,
-            stageX: s.stageX,
-            stageY: s.stageY,
-            stageScale: s.stageScale,
-            // FIX #7.3e: include measurements & erase strokes in every save.
-            measurementLines: s.measurementLines,
-            eraseStrokes: s.eraseStrokes,
-          });
+          }));
         } else {
-          // Unnamed project — silently persist as draft so work isn't lost
-          saveProject({
+          saveProject(buildProjectSnapshot(s, {
             id: DRAFT_AUTOSAVE_ID,
             name: 'Untitled Draft',
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString(),
-            floorPlan: s.floorPlan,
-            scale: s.scale,
-            items: s.items,
-            stageX: s.stageX,
-            stageY: s.stageY,
-            stageScale: s.stageScale,
-            // FIX #7.3e
-            measurementLines: s.measurementLines,
-            eraseStrokes: s.eraseStrokes,
-          });
-          // Prompt to name it, but only once per session
+          }));
           if (!autoSavePromptDismissedRef.current) {
             setShowAutoSavePrompt(true);
           }
         }
-        // Successful save clears any stale error banner and dirty flag.
         if (autoSaveError) setAutoSaveError(null);
         dispatch({ type: 'MARK_CLEAN' });
+        // FIX #3.2 (code quality audit)
+        setLastAutoSaveAt(Date.now());
       } catch (err) {
-        // FIX #2: log only — do not alert(). Suspend further auto-saves if
-        // this looks like a storage quota problem so we don't loop.
         console.error('Auto-save failed:', err);
         const msg = err instanceof Error ? err.message : String(err);
-        // FIX #7.2a: surface the failure visibly.
         setAutoSaveError(msg);
         if (/quota|storage/i.test(msg)) {
           quotaHit = true;
           console.warn('Auto-save disabled for this session (storage full).');
         }
       }
-    }, 300000);
+    }, AUTOSAVE_INTERVAL_MS);
     return () => clearInterval(interval);
-    // dispatch and autoSaveError are stable/reactive but not needed to re-run
-    // the interval — leaving deps empty keeps the timer registered once.
+    // dispatch is stable; interval registered once — deps empty on purpose.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -196,21 +187,8 @@ export default function App() {
   }, [state.dirty]);
 
   const handleAutoSaveNamed = useCallback((name: string) => {
-    const project: Project = {
-      id: uuidv4(),
-      name,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      floorPlan: state.floorPlan,
-      scale: state.scale,
-      items: state.items,
-      stageX: state.stageX,
-      stageY: state.stageY,
-      stageScale: state.stageScale,
-      // FIX #7.3e
-      measurementLines: state.measurementLines,
-      eraseStrokes: state.eraseStrokes,
-    };
+    // FIX #4.6 (code quality audit)
+    const project: Project = buildProjectSnapshot(state, { id: uuidv4(), name });
     try {
       saveProject(project);
       // FIX #7.6e (project storage audit): delete the leftover unnamed draft
@@ -237,6 +215,37 @@ export default function App() {
     newProject();
   }, [state.dirty, newProject]);
 
+  // FIX #2.7 / #6.7 (code quality audit): listen for CustomEvents from
+  // deeper components so we don't have to prop-drill callbacks.
+  useEffect(() => {
+    const onOpenScale = () => setShowScaleModal(true);
+    const onFileDrop = async (e: Event) => {
+      const file = (e as CustomEvent).detail as File | undefined;
+      if (!file) return;
+      // Reuse the toolbar's upload path indirectly via SET_FLOOR_PLAN.
+      try {
+        const { renderPdfToBase64, readImageFile } = await import('./lib/pdfHelper');
+        const isPdf = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
+        const result = isPdf ? await renderPdfToBase64(file) : await readImageFile(file);
+        dispatch({
+          type: 'SET_FLOOR_PLAN',
+          floorPlan: { imageData: result.dataUrl, width: result.width, height: result.height },
+        });
+        dispatch({ type: 'SET_STAGE', x: 20, y: 20, scale: 1 });
+        setShowScaleModal(true);
+      } catch (err) {
+        console.error('External file drop failed:', err);
+        setAutoSaveError(err instanceof Error ? err.message : 'Failed to load dropped file.');
+      }
+    };
+    window.addEventListener('mirabello:open-scale', onOpenScale);
+    window.addEventListener('mirabello:file-drop', onFileDrop as EventListener);
+    return () => {
+      window.removeEventListener('mirabello:open-scale', onOpenScale);
+      window.removeEventListener('mirabello:file-drop', onFileDrop as EventListener);
+    };
+  }, [dispatch]);
+
   // FIX #7.6d (project storage audit): recovery actions offered on startup.
   const handleRestoreDraft = useCallback(() => {
     if (!recoveryDraft) return;
@@ -254,12 +263,25 @@ export default function App() {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
       if ((e.target as HTMLElement)?.isContentEditable) return;
       if (document.querySelector('.modal-overlay')) return;
+      // FIX #5.6 (code quality audit): Ctrl/Cmd+Z / Ctrl/Cmd+Y / Ctrl+Shift+Z
+      // now actually call undo() / redo(). Previously the handler caught the
+      // key and only called preventDefault, so undo/redo were unreachable
+      // from the keyboard.
       if ((e.metaKey || e.ctrlKey) && e.key === 'z' && !e.shiftKey) {
         e.preventDefault();
-        // Handled in context
+        undo();
+        return;
       }
       if ((e.metaKey || e.ctrlKey) && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) {
         e.preventDefault();
+        redo();
+        return;
+      }
+      // FIX #3.8 (code quality audit): show the shortcut cheat-sheet.
+      if (e.key === '?' || (e.shiftKey && e.key === '/')) {
+        e.preventDefault();
+        setShowShortcutHelp(v => !v);
+        return;
       }
       if (e.key === ' ') {
         e.preventDefault();
@@ -296,7 +318,7 @@ export default function App() {
       window.removeEventListener('keydown', handler);
       window.removeEventListener('keyup', upHandler);
     };
-  }, [dispatch, state.currentTool]);
+  }, [dispatch, state.currentTool, undo, redo]);
 
   // ── Export area selection callbacks ──
   const handleStartExportSelection = useCallback(() => {
@@ -316,18 +338,51 @@ export default function App() {
   }, [dispatch]);
 
   const handleZoomIn = useCallback(() => {
-    const newScale = Math.min(state.stageScale * 1.2, 10);
+    // FIX #4.4 (code quality audit): constants for zoom bounds
+    const newScale = Math.min(state.stageScale * BUTTON_ZOOM_FACTOR, ZOOM_MAX);
     dispatch({ type: 'SET_STAGE', x: state.stageX, y: state.stageY, scale: newScale });
   }, [state.stageScale, state.stageX, state.stageY, dispatch]);
 
   const handleZoomOut = useCallback(() => {
-    const newScale = Math.max(state.stageScale / 1.2, 0.05);
+    const newScale = Math.max(state.stageScale / BUTTON_ZOOM_FACTOR, ZOOM_MIN);
     dispatch({ type: 'SET_STAGE', x: state.stageX, y: state.stageY, scale: newScale });
   }, [state.stageScale, state.stageX, state.stageY, dispatch]);
 
+  // FIX #3.7 (code quality audit): Zoom Fit now centers on the content's
+  // bounding box (items + floor plan) rather than hard-coding (20, 20, 1).
+  // Previously items panned far off screen were unreachable from Zoom Fit.
   const handleZoomFit = useCallback(() => {
-    dispatch({ type: 'SET_STAGE', x: 20, y: 20, scale: 1 });
-  }, [dispatch]);
+    const stage = stageRef.current;
+    // Collect bounds of items and floor plan.
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const item of state.items) {
+      minX = Math.min(minX, item.x);
+      minY = Math.min(minY, item.y);
+      maxX = Math.max(maxX, item.x + item.widthPx);
+      maxY = Math.max(maxY, item.y + item.heightPx);
+    }
+    if (state.floorPlan) {
+      minX = Math.min(minX, 0);
+      minY = Math.min(minY, 0);
+      maxX = Math.max(maxX, state.floorPlan.width);
+      maxY = Math.max(maxY, state.floorPlan.height);
+    }
+    if (!isFinite(minX)) {
+      dispatch({ type: 'SET_STAGE', x: 20, y: 20, scale: 1 });
+      return;
+    }
+    const bw = Math.max(1, maxX - minX);
+    const bh = Math.max(1, maxY - minY);
+    const vw = (stage?.width() ?? 800) - ZOOM_FIT_PADDING_PX * 2;
+    const vh = (stage?.height() ?? 600) - ZOOM_FIT_PADDING_PX * 2;
+    const scale = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, Math.min(vw / bw, vh / bh)));
+    // Center content in the viewport.
+    const cx = (minX + maxX) / 2;
+    const cy = (minY + maxY) / 2;
+    const x = (stage?.width() ?? 800) / 2 - cx * scale;
+    const y = (stage?.height() ?? 600) / 2 - cy * scale;
+    dispatch({ type: 'SET_STAGE', x, y, scale });
+  }, [state.items, state.floorPlan, dispatch]);
 
   return (
     <div style={{
@@ -353,6 +408,8 @@ export default function App() {
         // FIX #7.4d: reflect unsaved state on the toolbar (used for the
         // "unsaved" indicator).
         dirty={state.dirty}
+        // FIX #3.8 (code quality audit): shortcut help.
+        onShowShortcutHelp={() => setShowShortcutHelp(true)}
       />
 
       {/* Main area */}
@@ -381,7 +438,8 @@ export default function App() {
       </div>
 
       {/* Status bar */}
-      <StatusBar />
+      {/* FIX #3.2 (code quality audit): passes last-saved timestamp */}
+      <StatusBar lastAutoSaveAt={lastAutoSaveAt} />
 
       {/* Modals */}
       {showScaleModal && <ScaleModal onClose={() => setShowScaleModal(false)} />}
@@ -503,6 +561,12 @@ export default function App() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* FIX #3.8 (code quality audit): keyboard shortcut cheat sheet.
+          Toggled with the '?' key. */}
+      {showShortcutHelp && (
+        <ShortcutHelpModal onClose={() => setShowShortcutHelp(false)} />
       )}
 
       {/* FIX #7.6d (project storage audit): crash-recovery prompt on

@@ -104,6 +104,9 @@ export interface AppState {
   stageScale: number;
   snapToObjects: boolean;
   showDimensions: boolean;
+  // FIX #5.1 (code quality audit): grid overlay + snap toggles.
+  showGrid: boolean;
+  snapToGrid: boolean;
   currentProject: Project | null;
   measurementLines: MeasurementLine[];
   eraseStrokes: EraseStroke[];
@@ -129,6 +132,9 @@ export type AppAction =
   | { type: 'SET_STAGE'; x: number; y: number; scale: number }
   | { type: 'TOGGLE_SNAP_OBJECTS' }
   | { type: 'TOGGLE_DIMENSIONS' }
+  // FIX #5.1 / #5.2 (code quality audit)
+  | { type: 'TOGGLE_GRID' }
+  | { type: 'TOGGLE_SNAP_GRID' }
   | { type: 'LOAD_PROJECT'; project: Project }
   | { type: 'SET_ITEMS'; items: CanvasItem[] }
   | { type: 'BRING_FORWARD'; id: string }

@@ -21,10 +21,16 @@ export default function ExportModal({ stageRef, exportRegion, onClose }: Props) 
     ? `1:${Math.round(100 / state.scale.pixelsPerMeter * 100)} (approx.)`
     : 'Scale not calibrated';
 
+  // FIX #2.6 (code quality audit): guard against empty content so users
+  // don't get a blank export and think the feature is broken.
+  const hasContent = !!state.floorPlan || state.items.length > 0;
+  const [emptyWarn, setEmptyWarn] = useState<string | null>(null);
+
   const handleExportPng = async () => {
     if (!stageRef.current) return;
+    if (!hasContent) { setEmptyWarn('Nothing to export — upload a floor plan or add items first.'); return; }
     if (!projectName.trim()) { setNameError(true); return; }
-    setNameError(false);
+    setNameError(false); setEmptyWarn(null);
     setExporting(true);
     try {
       await exportToPng(stageRef.current, { projectName: projectName.trim(), designerName, scaleLabel, region: exportRegion || undefined });
@@ -35,8 +41,9 @@ export default function ExportModal({ stageRef, exportRegion, onClose }: Props) 
 
   const handleExportPdf = async () => {
     if (!stageRef.current) return;
+    if (!hasContent) { setEmptyWarn('Nothing to export — upload a floor plan or add items first.'); return; }
     if (!projectName.trim()) { setNameError(true); return; }
-    setNameError(false);
+    setNameError(false); setEmptyWarn(null);
     setExporting(true);
     try {
       await exportToPdf(stageRef.current, { projectName: projectName.trim(), designerName, scaleLabel, region: exportRegion || undefined, pdfFormat });
@@ -49,6 +56,18 @@ export default function ExportModal({ stageRef, exportRegion, onClose }: Props) 
     <div className="modal-overlay">
       <div className="modal" style={{ minWidth: 420 }}>
         <div className="modal-title">Export Drawing</div>
+
+        {/* FIX #2.6 (code quality audit) */}
+        {emptyWarn && (
+          <div style={{
+            fontSize: 12, color: '#fc8181',
+            background: 'rgba(252,129,129,0.1)',
+            border: '1px solid rgba(252,129,129,0.3)',
+            padding: '8px 10px', borderRadius: 6, marginBottom: 10,
+          }}>
+            {emptyWarn}
+          </div>
+        )}
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
           <div>

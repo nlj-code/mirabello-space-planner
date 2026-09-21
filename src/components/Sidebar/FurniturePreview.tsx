@@ -5,11 +5,15 @@ interface Props {
   def: FurnitureDefinition;
 }
 
+// FIX #1.11 (code quality audit): memoize FurniturePreview so re-renders of
+// Sidebar (which happen on every search keystroke) don't rebuild all 94 SVGs.
+// eslint-disable-next-line prefer-const
+
 const BG  = '#edeae4';
 const ST  = '#2a2a2a';
 const ST2 = '#666666';
 
-export default function FurniturePreview({ def }: Props) {
+function FurniturePreviewInner({ def }: Props) {
   const S = 34;
   const P = 2;
 
@@ -614,3 +618,7 @@ export default function FurniturePreview({ def }: Props) {
     </svg>
   );
 }
+
+// FIX #1.11 (code quality audit)
+const FurniturePreview = React.memo(FurniturePreviewInner);
+export default FurniturePreview;

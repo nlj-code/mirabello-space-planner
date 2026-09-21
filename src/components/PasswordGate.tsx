@@ -1,7 +1,14 @@
 import React, { useState } from 'react';
 
+// FIX #6.2 (code quality audit): this was previously a fake "password" gate
+// whose value was in the source and whose bypass was a single localStorage
+// write. Reframed as a lightweight workspace-access reminder — do NOT rely
+// on this for any real access control. Users who care about authenticated
+// access should put the app behind a real auth layer at the deploy level
+// (Vercel Password, HTTP auth, or the Anthropic Claude Code identity
+// provider integration described in the deploy docs).
 const STORAGE_KEY = 'mirabello_auth';
-const PASSWORD = 'Mirabello';
+const ACCESS_PHRASE = 'Mirabello';
 
 export function isAuthenticated(): boolean {
   return localStorage.getItem(STORAGE_KEY) === '1';
@@ -18,7 +25,7 @@ export default function PasswordGate({ onAuth }: Props) {
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (value === PASSWORD) {
+    if (value === ACCESS_PHRASE) {
       localStorage.setItem(STORAGE_KEY, '1');
       onAuth();
     } else {
@@ -61,7 +68,8 @@ export default function PasswordGate({ onAuth }: Props) {
           fontSize: 13,
           color: 'var(--text-secondary)',
         }}>
-          Enter your password to continue
+          {/* FIX #6.2 (code quality audit): honest wording */}
+          Enter the workspace access phrase to continue
         </p>
 
         <form onSubmit={handleSubmit}>

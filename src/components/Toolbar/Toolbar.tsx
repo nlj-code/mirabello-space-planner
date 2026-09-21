@@ -1,4 +1,4 @@
-import React, { useRef } from 'react';
+import React, { useRef, useState } from 'react';
 import { useApp } from '../../store/AppContext';
 import { Tool } from '../../types';
 import { renderPdfToBase64, readImageFile } from '../../lib/pdfHelper';
@@ -18,6 +18,8 @@ interface Props {
   onNewProject?: () => void;
   // FIX #7.4d (project storage audit): unsaved indicator.
   dirty?: boolean;
+  // FIX #3.8 (code quality audit)
+  onShowShortcutHelp?: () => void;
 }
 
 const TOOLS: { id: Tool; label: string; icon: React.ReactNode; title: string }[] = [
@@ -84,15 +86,21 @@ export default function Toolbar({
   onOpenScaleModal, onOpenProjectModal, onOpenExportModal,
   onZoomIn, onZoomOut, onZoomFit,
   eraseMode, setEraseMode, eraseBrushSize, setEraseBrushSize,
-  // FIX #7.4c + #7.4d (project storage audit)
-  onNewProject, dirty,
+  // FIX #7.4c + #7.4d (project storage audit) + FIX #3.8 (code quality audit)
+  onNewProject, dirty, onShowShortcutHelp,
 }: Props) {
   const { state, dispatch, undo, redo, canUndo, canRedo } = useApp();
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // FIX #3.1 (code quality audit): loading indicator during upload / PDF render.
+  const [isUploading, setIsUploading] = useState(false);
+  // FIX #3.9 (code quality audit): inline error instead of blocking alert().
+  const [uploadError, setUploadError] = useState<string | null>(null);
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    setUploadError(null);
+    setIsUploading(true);
     try {
       const isPdf = file.type === 'application/pdf'
         || file.type === 'application/x-pdf'
@@ -113,9 +121,13 @@ export default function Toolbar({
       onOpenScaleModal();
     } catch (err) {
       console.error('File upload failed:', err);
-      alert('Failed to load file. Please use PDF, JPG, or PNG.');
+      // FIX #3.9: non-blocking toast instead of alert()
+      setUploadError(err instanceof Error ? err.message : 'Failed to load file. Please use PDF, JPG, or PNG.');
+      window.setTimeout(() => setUploadError(null), 5000);
+    } finally {
+      setIsUploading(false);
+      e.target.value = '';
     }
-    e.target.value = '';
   };
 
   return (
@@ -140,15 +152,32 @@ export default function Toolbar({
       />
       <button
         className="btn btn-primary"
-        style={{ fontSize: 11, padding: '5px 10px' }}
+        style={{ fontSize: 11, padding: '5px 10px', opacity: isUploading ? 0.7 : 1 }}
         onClick={() => fileInputRef.current?.click()}
+        disabled={isUploading}
         title="Upload floor plan (PDF or image)"
       >
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-          <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M17 8l-5-5-5 5M12 3v12" />
-        </svg>
-        Upload Plan
+        {isUploading ? (
+          // FIX #3.1 (code quality audit): spinner during PDF/image processing
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ animation: 'spin 1s linear infinite' }}>
+            <path d="M21 12a9 9 0 11-6.219-8.56" />
+          </svg>
+        ) : (
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M17 8l-5-5-5 5M12 3v12" />
+          </svg>
+        )}
+        {isUploading ? 'Loading…' : 'Upload Plan'}
       </button>
+      {/* FIX #3.9 (code quality audit): inline upload error toast */}
+      {uploadError && (
+        <span style={{
+          color: '#fc8181', fontSize: 11, marginLeft: 6,
+          background: 'rgba(252,129,129,0.1)',
+          border: '1px solid rgba(252,129,129,0.3)',
+          padding: '3px 8px', borderRadius: 4,
+        }}>{uploadError}</span>
+      )}
 
       <div className="toolbar-divider" />
 
@@ -283,6 +312,49 @@ export default function Toolbar({
         <span style={{ fontSize: 9, lineHeight: 1, opacity: 0.7 }}>Dims</span>
       </button>
 
+      {/* FIX #5.1 (code quality audit): grid overlay toggle */}
+      <button
+        className={`btn-icon ${state.showGrid ? 'active' : ''}`}
+        title="Toggle 10 cm grid overlay"
+        onClick={() => dispatch({ type: 'TOGGLE_GRID' })}
+        style={{ display: 'inline-flex', flexDirection: 'column', alignItems: 'center', gap: 1, padding: '4px 8px' }}
+      >
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+          <path d="M3 3h18v18H3z M3 9h18 M3 15h18 M9 3v18 M15 3v18" />
+        </svg>
+        <span style={{ fontSize: 9, lineHeight: 1, opacity: 0.7 }}>Grid</span>
+      </button>
+
+      {/* FIX #5.2 (code quality audit): snap-to-grid toggle */}
+      <button
+        className={`btn-icon ${state.snapToGrid ? 'active' : ''}`}
+        title="Snap to 10 cm grid"
+        onClick={() => dispatch({ type: 'TOGGLE_SNAP_GRID' })}
+        style={{ display: 'inline-flex', flexDirection: 'column', alignItems: 'center', gap: 1, padding: '4px 8px' }}
+      >
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+          <path d="M4 4l6 6M14 14l6 6M20 4l-6 6M10 14l-6 6" />
+          <circle cx="12" cy="12" r="2" />
+        </svg>
+        <span style={{ fontSize: 9, lineHeight: 1, opacity: 0.7 }}>Snap</span>
+      </button>
+
+      {/* FIX #5.3 (code quality audit): snap-to-object toggle (state existed
+          but had no UI). */}
+      <button
+        className={`btn-icon ${state.snapToObjects ? 'active' : ''}`}
+        title="Snap to nearby object edges"
+        onClick={() => dispatch({ type: 'TOGGLE_SNAP_OBJECTS' })}
+        style={{ display: 'inline-flex', flexDirection: 'column', alignItems: 'center', gap: 1, padding: '4px 8px' }}
+      >
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+          <rect x="4" y="4" width="7" height="7" />
+          <rect x="13" y="13" width="7" height="7" />
+          <path d="M11 8h5M8 11v5" strokeDasharray="2 2" />
+        </svg>
+        <span style={{ fontSize: 9, lineHeight: 1, opacity: 0.7 }}>Obj</span>
+      </button>
+
       <div className="toolbar-divider" />
 
       {/* Undo/Redo */}
@@ -383,6 +455,24 @@ export default function Toolbar({
         </svg>
         Export
       </button>
+
+      {/* FIX #3.8 (code quality audit): shortcut help button */}
+      {onShowShortcutHelp && (
+        <button
+          className="btn-icon"
+          onClick={onShowShortcutHelp}
+          title="Keyboard shortcuts (?)"
+          style={{ marginLeft: 4 }}
+        >
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <circle cx="12" cy="12" r="10" />
+            <path d="M9.09 9a3 3 0 015.83 1c0 2-3 3-3 3M12 17h.01" />
+          </svg>
+        </button>
+      )}
+
+      {/* FIX #3.1 (code quality audit): spinner animation used by Upload */}
+      <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
     </div>
   );
 }

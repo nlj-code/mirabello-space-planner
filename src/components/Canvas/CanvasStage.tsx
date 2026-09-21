@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useCallback, useState } from 'react';
+import React, { useRef, useEffect, useCallback, useMemo, useState } from 'react';
 import { Stage, Layer, Image as KonvaImage, Transformer, Rect, Line, Circle, Text, Group } from 'react-konva';
 import Konva from 'konva';
 import { useApp } from '../../store/AppContext';
@@ -7,6 +7,14 @@ import { ExportRegion } from '../../lib/exportHelper';
 import { getDefaultColor } from '../../lib/furnitureDefinitions';
 import FurnitureShape from './FurnitureShape';
 import { v4 as uuidv4 } from 'uuid';
+import {
+  WHEEL_ZOOM_FACTOR, ZOOM_MIN, ZOOM_MAX,
+  GRID_SIZE_CM, GRID_RENDER_MARGIN_PX,
+  SNAP_TO_OBJECT_TOLERANCE_PX,
+  TRANSFORMER_ANCHOR_SIZE, TRANSFORMER_ANCHOR_CORNER_RADIUS,
+  ROTATION_SNAPS, ROTATION_SNAP_TOLERANCE_DEG,
+  MASS_DELETE_CONFIRM_THRESHOLD,
+} from '../../config/constants';
 
 interface ContextMenu {
   x: number;
@@ -27,6 +35,21 @@ interface Props {
 function formatDistance(cm: number): string {
   if (cm >= 100) return `${(cm / 100).toFixed(2)} m`;
   return `${cm.toFixed(1)} cm`;
+}
+
+// FIX #2.2 / #2.3 / #1.13 (code quality audit): safe pointer accessors.
+// Konva's getPointerPosition / getRelativePointerPosition can return null
+// (event fired before the pointer has ever entered the stage). Using `!` here
+// caused a silent-crash class of bugs.
+function safePointer(stage: Konva.Stage | null | undefined) {
+  if (!stage) return null;
+  const p = stage.getPointerPosition();
+  return p ?? null;
+}
+function safeRelPointer(stage: Konva.Stage | null | undefined) {
+  if (!stage) return null;
+  const p = stage.getRelativePointerPosition();
+  return p ?? null;
 }
 
 export default function CanvasStage({ stageRef, onContextMenu, eraseMode, eraseBrushSize, onExportRegionSelected, onCancelExportSelection }: Props) {
@@ -258,6 +281,11 @@ export default function CanvasStage({ stageRef, onContextMenu, eraseMode, eraseB
         } else if (state.currentTool === 'measure' && state.measurementLines.length > 0) {
           dispatch({ type: 'CLEAR_MEASUREMENTS' });
         } else if (state.selectedIds.length > 0) {
+          // FIX #3.5 (code quality audit): confirm mass-delete of many items.
+          if (state.selectedIds.length >= MASS_DELETE_CONFIRM_THRESHOLD) {
+            const ok = window.confirm(`Delete ${state.selectedIds.length} items?`);
+            if (!ok) return;
+          }
           pushHistory();
           dispatch({ type: 'DELETE_ITEMS', ids: state.selectedIds });
         }
@@ -293,19 +321,33 @@ export default function CanvasStage({ stageRef, onContextMenu, eraseMode, eraseB
       if (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'ArrowUp' || e.key === 'ArrowDown') {
         e.preventDefault();
         pushHistory();
+        // FIX #5.2 (code quality audit): Shift+Arrow nudges by 10 cm.
+        const step = e.shiftKey ? nudgePx * 10 : nudgePx;
         state.selectedIds.forEach(id => {
           const item = state.items.find(i => i.id === id);
           if (!item || item.locked) return;
-          const dx = e.key === 'ArrowLeft' ? -nudgePx : e.key === 'ArrowRight' ? nudgePx : 0;
-          const dy = e.key === 'ArrowUp' ? -nudgePx : e.key === 'ArrowDown' ? nudgePx : 0;
+          const dx = e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0;
+          const dy = e.key === 'ArrowUp' ? -step : e.key === 'ArrowDown' ? step : 0;
           dispatch({ type: 'UPDATE_ITEM', id, updates: { x: item.x + dx, y: item.y + dy } });
         });
       }
-      if ((e.metaKey || e.ctrlKey) && e.key === 'g') {
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key === 'g') {
         e.preventDefault();
         if (state.selectedIds.length >= 2) {
           pushHistory();
           dispatch({ type: 'GROUP_ITEMS', ids: state.selectedIds });
+        }
+      }
+      // FIX #5.11 (code quality audit): Ctrl+Shift+G to ungroup a group.
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && (e.key === 'g' || e.key === 'G')) {
+        e.preventDefault();
+        for (const id of state.selectedIds) {
+          const it = state.items.find(i => i.id === id);
+          if (it?.isGroup) {
+            pushHistory();
+            dispatch({ type: 'UNGROUP_ITEM', id });
+            break;
+          }
         }
       }
       // ── Tool shortcuts ──
@@ -373,10 +415,54 @@ export default function CanvasStage({ stageRef, onContextMenu, eraseMode, eraseB
       const widthPx = (def.widthCm / 100) * ppm;
       const heightPx = (def.heightCm / 100) * ppm;
 
-      const snappedX = x - widthPx / 2;
-      const snappedY = y - heightPx / 2;
+      let snappedX = x - widthPx / 2;
+      let snappedY = y - heightPx / 2;
+      // FIX #5.2 (code quality audit): snap to 10 cm grid on drop.
+      if (s.snapToGrid) {
+        const step = (GRID_SIZE_CM / 100) * ppm;
+        if (step > 0) {
+          snappedX = Math.round(snappedX / step) * step;
+          snappedY = Math.round(snappedY / step) * step;
+        }
+      }
 
       const maxZ = s.items.length > 0 ? Math.max(...s.items.map(i => i.zIndex)) : 0;
+
+      // FIX #3.11 (code quality audit): if the definition is a group with
+      // child definitions, materialise the children into `groupItems` with
+      // parent-relative positions. Previously group definitions dropped as
+      // empty rectangles (Lobby Cluster / Hotel Bed Set were visibly broken).
+      let groupItems: CanvasItem[] | undefined;
+      if (def.isGroup && Array.isArray(def.groupItems) && def.groupItems.length > 0) {
+        const cols = Math.max(1, Math.ceil(Math.sqrt(def.groupItems.length)));
+        const cellW = widthPx / cols;
+        const cellH = heightPx / Math.ceil(def.groupItems.length / cols);
+        groupItems = def.groupItems.map((gi, idx) => {
+          const gw = (gi.widthCm / 100) * ppm;
+          const gh = (gi.heightCm / 100) * ppm;
+          const col = idx % cols;
+          const row = Math.floor(idx / cols);
+          const cx = col * cellW + (cellW - gw) / 2;
+          const cy = row * cellH + (cellH - gh) / 2;
+          return {
+            id: `${uuidv4()}`,
+            defId: gi.id,
+            name: gi.name,
+            category: def.category,
+            x: Math.max(0, cx),
+            y: Math.max(0, cy),
+            widthPx: gw, heightPx: gh,
+            widthCm: gi.widthCm, heightCm: gi.heightCm,
+            rotation: 0,
+            fill: getDefaultColor(def.category),
+            opacity: 1,
+            label: '',
+            locked: false,
+            zIndex: idx,
+            shape: gi.shape,
+          } as CanvasItem;
+        });
+      }
 
       const newItem: CanvasItem = {
         id: uuidv4(),
@@ -397,6 +483,7 @@ export default function CanvasStage({ stageRef, onContextMenu, eraseMode, eraseB
         zIndex: maxZ + 1,
         shape: def.shape,
         isGroup: def.isGroup || false,
+        groupItems,
       };
 
       pushHistoryRef.current();
@@ -404,13 +491,30 @@ export default function CanvasStage({ stageRef, onContextMenu, eraseMode, eraseB
       dispatch({ type: 'SET_SELECTED', ids: [newItem.id] });
     };
 
+    // FIX #6.7 (code quality audit): accept native file drops (PDF / image
+    // from desktop) — otherwise the drop is silently ignored. This forwards
+    // to a custom event that Toolbar can listen to; simpler than plumbing a
+    // callback through props.
+    const onFileDrop = (e: DragEvent) => {
+      if (!e.dataTransfer?.files?.length) return;
+      // Only handle if we didn't already handle a sidebar-furniture drop.
+      const furn = e.dataTransfer.getData('furniture');
+      if (furn) return;
+      e.preventDefault();
+      const file = e.dataTransfer.files[0];
+      window.dispatchEvent(new CustomEvent('mirabello:file-drop', { detail: file }));
+    };
+
     el.addEventListener('dragover', onDragOver);
     el.addEventListener('dragenter', onDragEnter);
     el.addEventListener('drop', onDrop);
+    // FIX #6.7 (code quality audit)
+    el.addEventListener('drop', onFileDrop);
     return () => {
       el.removeEventListener('dragover', onDragOver);
       el.removeEventListener('dragenter', onDragEnter);
       el.removeEventListener('drop', onDrop);
+      el.removeEventListener('drop', onFileDrop);
     };
   }, [stageRef, dispatch]);
 
@@ -419,9 +523,11 @@ export default function CanvasStage({ stageRef, onContextMenu, eraseMode, eraseB
     const stage = stageRef.current;
     if (!stage) return;
 
-    const scaleBy = 1.08;
+    // FIX #4.4 (code quality audit): named zoom constants
+    const scaleBy = WHEEL_ZOOM_FACTOR;
     const oldScale = state.stageScale;
-    const pointer = stage.getPointerPosition()!;
+    const pointer = safePointer(stage);
+    if (!pointer) return;
 
     const mousePointTo = {
       x: (pointer.x - state.stageX) / oldScale,
@@ -429,8 +535,8 @@ export default function CanvasStage({ stageRef, onContextMenu, eraseMode, eraseB
     };
 
     const newScale = e.evt.deltaY < 0
-      ? Math.min(oldScale * scaleBy, 10)
-      : Math.max(oldScale / scaleBy, 0.05);
+      ? Math.min(oldScale * scaleBy, ZOOM_MAX)
+      : Math.max(oldScale / scaleBy, ZOOM_MIN);
 
     dispatch({
       type: 'SET_STAGE',
@@ -456,7 +562,8 @@ export default function CanvasStage({ stageRef, onContextMenu, eraseMode, eraseB
 
     // ── Measure tool ──
     if (state.currentTool === 'measure' && e.evt.button === 0) {
-      const pos = stage.getRelativePointerPosition()!;
+      const pos = safeRelPointer(stage);
+      if (!pos) return;
       if (!measureStartRef.current) {
         // First click: set start point
         measureStartRef.current = pos;
@@ -480,7 +587,8 @@ export default function CanvasStage({ stageRef, onContextMenu, eraseMode, eraseB
 
     // ── Erase tool ──
     if (state.currentTool === 'erase' && e.evt.button === 0) {
-      const pos = stage.getRelativePointerPosition()!;
+      const pos = safeRelPointer(stage);
+      if (!pos) return;
       // Check if we clicked on an existing erase stroke (handled via konva name attr)
       const target = e.target;
       const eraseName = target.name?.();
@@ -507,7 +615,8 @@ export default function CanvasStage({ stageRef, onContextMenu, eraseMode, eraseB
 
     // ── Export area selection tool ──
     if (state.currentTool === 'export' && e.evt.button === 0) {
-      const pos = stage.getRelativePointerPosition()!;
+      const pos = safeRelPointer(stage);
+      if (!pos) return;
       exportRectStartRef.current = pos;
       setTempExportRect({ x: pos.x, y: pos.y, w: 0, h: 0 });
       return;
@@ -515,7 +624,8 @@ export default function CanvasStage({ stageRef, onContextMenu, eraseMode, eraseB
 
     // ── Snapshot (copy area) tool ──
     if (state.currentTool === 'snapshot' && e.evt.button === 0) {
-      const pos = stage.getRelativePointerPosition()!;
+      const pos = safeRelPointer(stage);
+      if (!pos) return;
 
       if (snapshotAdjustingRef.current && tempSnapshotRectRef.current) {
         // In adjust phase: check if clicking on a handle or inside rect
@@ -561,7 +671,8 @@ export default function CanvasStage({ stageRef, onContextMenu, eraseMode, eraseB
 
     // Click on empty = deselect + start selection rect
     if (e.target === stage || e.target.getParent() === stage.findOne('Layer')) {
-      const pos = stage.getRelativePointerPosition()!;
+      const pos = safeRelPointer(stage);
+      if (!pos) return;
       if (e.evt.button === 0 && !e.evt.shiftKey) {
         dispatch({ type: 'SET_SELECTED', ids: [] });
         selStartRef.current = pos;
@@ -589,14 +700,16 @@ export default function CanvasStage({ stageRef, onContextMenu, eraseMode, eraseB
 
     // ── Measure tool: update preview line ──
     if (state.currentTool === 'measure' && measureStartRef.current) {
-      const pos = stage.getRelativePointerPosition()!;
+      const pos = safeRelPointer(stage);
+      if (!pos) return;
       setTempMeasureEnd(pos);
       return;
     }
 
     // ── Erase tool: update preview ──
     if (state.currentTool === 'erase') {
-      const pos = stage.getRelativePointerPosition()!;
+      const pos = safeRelPointer(stage);
+      if (!pos) return;
       if (eraseMode === 'brush' && eraseDrawingRef.current) {
         eraseBrushPointsRef.current.push(pos.x, pos.y);
         setTempErasePoints([...eraseBrushPointsRef.current]);
@@ -616,7 +729,8 @@ export default function CanvasStage({ stageRef, onContextMenu, eraseMode, eraseB
 
     // ── Export tool: update preview rect ──
     if (state.currentTool === 'export' && exportRectStartRef.current) {
-      const pos = stage.getRelativePointerPosition()!;
+      const pos = safeRelPointer(stage);
+      if (!pos) return;
       const start = exportRectStartRef.current;
       setTempExportRect({
         x: Math.min(pos.x, start.x),
@@ -630,7 +744,8 @@ export default function CanvasStage({ stageRef, onContextMenu, eraseMode, eraseB
     // ── Snapshot tool: handle adjust drag or update preview rect ──
     if (state.currentTool === 'snapshot') {
       if (adjustHandleRef.current && adjustStartRef.current) {
-        const pos = stage.getRelativePointerPosition()!;
+        const pos = safeRelPointer(stage);
+        if (!pos) return;
         const { mx, my, rect: startRect } = adjustStartRef.current;
         const dx = pos.x - mx;
         const dy = pos.y - my;
@@ -654,7 +769,8 @@ export default function CanvasStage({ stageRef, onContextMenu, eraseMode, eraseB
         return;
       }
       if (snapshotRectStartRef.current) {
-        const pos = stage.getRelativePointerPosition()!;
+        const pos = safeRelPointer(stage);
+        if (!pos) return;
         const start = snapshotRectStartRef.current;
         setSnapshotRect({
           x: Math.min(pos.x, start.x),
@@ -667,7 +783,8 @@ export default function CanvasStage({ stageRef, onContextMenu, eraseMode, eraseB
     }
 
     if (selStartRef.current) {
-      const pos = stage.getRelativePointerPosition()!;
+      const pos = safeRelPointer(stage);
+      if (!pos) return;
       setSelectionRect({
         x: Math.min(pos.x, selStartRef.current.x),
         y: Math.min(pos.y, selStartRef.current.y),
@@ -807,8 +924,45 @@ export default function CanvasStage({ stageRef, onContextMenu, eraseMode, eraseB
   }, [state.selectedIds, state.currentTool, dispatch]);
 
   const handleItemDragEnd = useCallback((id: string, x: number, y: number) => {
+    // FIX #5.2 / #5.3 (code quality audit): apply snap-to-grid and/or
+    // snap-to-object at drop of an item drag.
+    let sx = x, sy = y;
+    const s = stateRef.current;
+    if (s.snapToGrid) {
+      const step = (GRID_SIZE_CM / 100) * s.scale.pixelsPerMeter;
+      if (step > 0) {
+        sx = Math.round(sx / step) * step;
+        sy = Math.round(sy / step) * step;
+      }
+    }
+    if (s.snapToObjects) {
+      const item = s.items.find(i => i.id === id);
+      if (item) {
+        const tol = SNAP_TO_OBJECT_TOLERANCE_PX / (s.stageScale || 1);
+        const w = item.widthPx, h = item.heightPx;
+        // Candidate left/center/right and top/mid/bottom edges of other items.
+        const xEdges: number[] = [];
+        const yEdges: number[] = [];
+        for (const other of s.items) {
+          if (other.id === id) continue;
+          xEdges.push(other.x, other.x + other.widthPx / 2, other.x + other.widthPx);
+          yEdges.push(other.y, other.y + other.heightPx / 2, other.y + other.heightPx);
+        }
+        const trySnap = (v: number, edges: number[], size: number) => {
+          const candidates = [v, v + size / 2, v + size];
+          let best = { d: tol, offset: 0 };
+          for (const e of edges) for (const c of candidates) {
+            const d = Math.abs(c - e);
+            if (d < best.d) best = { d, offset: e - c };
+          }
+          return v + best.offset;
+        };
+        sx = trySnap(sx, xEdges, w);
+        sy = trySnap(sy, yEdges, h);
+      }
+    }
     pushHistory();
-    dispatch({ type: 'UPDATE_ITEM', id, updates: { x, y } });
+    dispatch({ type: 'UPDATE_ITEM', id, updates: { x: sx, y: sy } });
     forceUpdate(n => n + 1);
   }, [dispatch, pushHistory]);
 
@@ -851,7 +1005,12 @@ export default function CanvasStage({ stageRef, onContextMenu, eraseMode, eraseB
     onContextMenu({ x: e.evt.clientX, y: e.evt.clientY, itemId: id });
   }, [onContextMenu]);
 
-  const sortedItems = [...state.items].sort((a, b) => a.zIndex - b.zIndex);
+  // FIX #1.4 (code quality audit): memoize the sorted items array so it
+  // doesn't rebuild every render (frequent during pan/zoom/drag).
+  const sortedItems = useMemo(
+    () => [...state.items].sort((a, b) => a.zIndex - b.zIndex),
+    [state.items],
+  );
 
   // ── Helper to render a single measurement line ──
   const ppm = state.scale.pixelsPerMeter;
@@ -943,6 +1102,27 @@ export default function CanvasStage({ stageRef, onContextMenu, eraseMode, eraseB
       ref={containerRef}
       style={{ flex: 1, overflow: 'hidden', background: '#1a1a2e', position: 'relative' }}
     >
+      {/* FIX #2.7 (code quality audit): persistent non-blocking banner when
+          the user is placing items without a calibrated scale. Items render
+          at the default 100 px/m and will not match the plan. Clicking the
+          banner opens the scale modal via a bubbling custom event. */}
+      {!state.scale.calibrated && (state.items.length > 0 || state.floorPlan) && (
+        <div
+          onClick={() => window.dispatchEvent(new CustomEvent('mirabello:open-scale'))}
+          style={{
+            position: 'absolute', top: 10, left: '50%', transform: 'translateX(-50%)',
+            background: 'rgba(246,173,85,0.14)',
+            border: '1px solid rgba(246,173,85,0.5)',
+            color: '#f6ad55',
+            padding: '5px 12px', borderRadius: 6, fontSize: 12,
+            zIndex: 15, cursor: 'pointer',
+            boxShadow: '0 2px 8px rgba(0,0,0,0.4)',
+          }}
+          title="Click to calibrate — items are rendering at the default 100 px/m"
+        >
+          ⚠ Scale not calibrated — click to set it now
+        </div>
+      )}
       <Stage
         ref={stageRef as React.RefObject<Konva.Stage>}
         width={size.width}
@@ -969,6 +1149,52 @@ export default function CanvasStage({ stageRef, onContextMenu, eraseMode, eraseB
             />
           )}
         </Layer>
+
+        {/* FIX #5.1 (code quality audit): 10 cm grid overlay, only rendered
+            when the toggle is on. Draws inside the visible viewport plus a
+            small margin to keep line counts bounded at extreme zoom-out. */}
+        {state.showGrid && state.scale.pixelsPerMeter > 0 && (() => {
+          const step = (GRID_SIZE_CM / 100) * state.scale.pixelsPerMeter;
+          if (step <= 0) return null;
+          // Content-space extent visible on screen, plus margin.
+          const invScale = 1 / (state.stageScale || 1);
+          const marginContent = GRID_RENDER_MARGIN_PX * invScale;
+          const x0 = (-state.stageX) * invScale - marginContent;
+          const y0 = (-state.stageY) * invScale - marginContent;
+          const x1 = (size.width - state.stageX) * invScale + marginContent;
+          const y1 = (size.height - state.stageY) * invScale + marginContent;
+          const firstX = Math.floor(x0 / step) * step;
+          const firstY = Math.floor(y0 / step) * step;
+          const lines: React.ReactNode[] = [];
+          // Cap total lines to avoid pathological output.
+          let n = 0;
+          const cap = 800;
+          for (let x = firstX; x <= x1 && n < cap; x += step, n++) {
+            const isMajor = Math.round(x / step) % 10 === 0; // every 1 m
+            lines.push(
+              <Line
+                key={`gx${x}`}
+                points={[x, y0, x, y1]}
+                stroke={isMajor ? 'rgba(232,184,109,0.28)' : 'rgba(232,184,109,0.10)'}
+                strokeWidth={(isMajor ? 1 : 0.5) * invScale}
+                listening={false}
+              />
+            );
+          }
+          for (let y = firstY; y <= y1 && n < cap * 2; y += step, n++) {
+            const isMajor = Math.round(y / step) % 10 === 0;
+            lines.push(
+              <Line
+                key={`gy${y}`}
+                points={[x0, y, x1, y]}
+                stroke={isMajor ? 'rgba(232,184,109,0.28)' : 'rgba(232,184,109,0.10)'}
+                strokeWidth={(isMajor ? 1 : 0.5) * invScale}
+                listening={false}
+              />
+            );
+          }
+          return <Layer listening={false}>{lines}</Layer>;
+        })()}
 
         {/* Items layer (erase strokes render here too, in the same compositing context) */}
         <Layer>
@@ -1169,8 +1395,10 @@ export default function CanvasStage({ stageRef, onContextMenu, eraseMode, eraseB
             borderStrokeWidth={1}
             anchorStroke="#e8b86d"
             anchorFill="#1a1a2e"
-            anchorSize={8}
-            rotateAnchorOffset={20}
+            // FIX #3.4 (code quality audit): bigger, easier-to-hit anchors
+            anchorSize={TRANSFORMER_ANCHOR_SIZE}
+            anchorCornerRadius={TRANSFORMER_ANCHOR_CORNER_RADIUS}
+            rotateAnchorOffset={22}
             onTransformEnd={handleTransformEnd}
             onTransform={() => {
               // Broadcast live dimensions via CustomEvent (avoids state mutation during transform)
@@ -1191,8 +1419,9 @@ export default function CanvasStage({ stageRef, onContextMenu, eraseMode, eraseB
                 }));
               });
             }}
-            rotationSnaps={[0, 45, 90, 135, 180, 225, 270, 315]}
-            rotationSnapTolerance={5}
+            // FIX #4.4 (code quality audit)
+            rotationSnaps={ROTATION_SNAPS}
+            rotationSnapTolerance={ROTATION_SNAP_TOLERANCE_DEG}
             keepRatio={false}
           />
         </Layer>

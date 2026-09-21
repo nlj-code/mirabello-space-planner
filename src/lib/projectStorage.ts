@@ -391,7 +391,9 @@ export function exportProjectJson(project: Project): void {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `${project.name.replace(/\s+/g, '_')}_mirabello.json`;
+  // FIX #6.4 (code quality audit): filename-safe project name.
+  const safe = (project.name || 'project').replace(/[^A-Za-z0-9 _.-]/g, '_').replace(/\s+/g, '_');
+  a.download = `${safe || 'project'}_mirabello.json`;
   a.click();
   URL.revokeObjectURL(url);
 }

@@ -40,15 +40,24 @@ export default function ScaleModal({ onClose }: Props) {
     setStageSize({ w: Math.round(img.width * s), h: Math.round(img.height * s) });
   }, []);
 
-  // Load the floor plan image
+  // FIX #2.11 (code quality audit): add onerror + alive-flag so a bad image
+  // doesn't leave the modal stuck on "Loading floor plan…".
+  const [imgError, setImgError] = useState<string | null>(null);
   useEffect(() => {
     if (!state.floorPlan) return;
+    let alive = true;
     const img = new window.Image();
-    img.src = state.floorPlan.imageData;
     img.onload = () => {
+      if (!alive) return;
       imgRef.current = img;
       setFloorImage(img);
     };
+    img.onerror = () => {
+      if (!alive) return;
+      setImgError('Floor plan image failed to decode. Re-upload it from the toolbar.');
+    };
+    img.src = state.floorPlan.imageData;
+    return () => { alive = false; };
   }, [state.floorPlan]);
 
   // Fit once the image is loaded
@@ -91,12 +100,15 @@ export default function ScaleModal({ onClose }: Props) {
     ? Math.sqrt(Math.pow(p2.x - p1.x, 2) + Math.pow(p2.y - p1.y, 2))
     : 0;
 
+  // FIX #3.9 (code quality audit): non-blocking inline error instead of alert().
+  const [applyError, setApplyError] = useState<string | null>(null);
   const handleApply = () => {
     const m = parseFloat(realLength);
     if (isNaN(m) || m <= 0 || !lineLen) {
-      alert('Please enter a valid length in meters');
+      setApplyError('Please enter a valid length in metres');
       return;
     }
+    setApplyError(null);
     // lineLen is measured on the scaled-down image in the modal
     // Convert to the full-resolution image pixel space:
     const lineLenAtFullRes = lineLen / imgScale;
@@ -321,7 +333,9 @@ export default function ScaleModal({ onClose }: Props) {
             </Stage>
           </div>
         ) : (
-          <div style={{ color: '#8899aa', fontSize: 14 }}>Loading floor plan…</div>
+          <div style={{ color: imgError ? '#fc8181' : '#8899aa', fontSize: 14, textAlign: 'center' }}>
+            {imgError ?? 'Loading floor plan…'}
+          </div>
         )}
       </div>
 
@@ -368,6 +382,10 @@ export default function ScaleModal({ onClose }: Props) {
             <button className="btn btn-ghost" onClick={reset}>
               ↺ Redraw
             </button>
+            {/* FIX #3.9 (code quality audit) */}
+            {applyError && (
+              <span style={{ color: '#fc8181', fontSize: 12, marginLeft: 8 }}>{applyError}</span>
+            )}
           </div>
         ) : (
           <div style={{ color: 'var(--text-secondary, #8899aa)', fontSize: 13 }}>
