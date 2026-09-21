@@ -100,12 +100,18 @@ export default function CanvasStage({ stageRef, onContextMenu, eraseMode, eraseB
       setFloorImage(null);
       return;
     }
+    // FIX #4 (drag/drop audit): guard against a stale onload firing after a
+    // newer floor plan swap. Without this, a slow-loading previous image
+    // could overwrite floorImageRef/setFloorImage after the user swapped it.
+    let alive = true;
     const img = new window.Image();
-    img.src = state.floorPlan.imageData;
     img.onload = () => {
+      if (!alive) return;
       floorImageRef.current = img;
       setFloorImage(img);
     };
+    img.src = state.floorPlan.imageData;
+    return () => { alive = false; };
   }, [state.floorPlan]);
 
   // Update transformer
@@ -343,11 +349,17 @@ export default function CanvasStage({ stageRef, onContextMenu, eraseMode, eraseB
       try { def = JSON.parse(data); }
       catch { return; }
 
-      // Read latest state from ref to avoid stale closures
+      // FIX #1 (drag/drop audit): read stage transform directly from the live
+      // Konva stage instead of stateRef.stageX/stageY/stageScale. React state
+      // can lag Konva after a fast wheel/pan burst (batched updates); reading
+      // from stg.x()/y()/scaleX() guarantees drops land where the user sees.
       const s = stateRef.current;
       const stageBox = stg.container().getBoundingClientRect();
-      const x = (e.clientX - stageBox.left - s.stageX) / s.stageScale;
-      const y = (e.clientY - stageBox.top - s.stageY) / s.stageScale;
+      const liveX = stg.x();
+      const liveY = stg.y();
+      const liveScale = stg.scaleX();
+      const x = (e.clientX - stageBox.left - liveX) / liveScale;
+      const y = (e.clientY - stageBox.top - liveY) / liveScale;
 
       const ppm = s.scale.pixelsPerMeter;
       const widthPx = (def.widthCm / 100) * ppm;
@@ -1047,10 +1059,12 @@ export default function CanvasStage({ stageRef, onContextMenu, eraseMode, eraseB
               key={item.id}
               item={item}
               isSelected={state.selectedIds.includes(item.id)}
-              onSelect={e => handleItemSelect(e, item.id)}
+              // FIX #6 (drag/drop audit): pass stable handlers (no per-item
+              // inline arrows) so React.memo(FurnitureShape) can skip renders.
+              onSelect={handleItemSelect}
               onDragStart={pushHistory}
-              onDragEnd={(x, y) => handleItemDragEnd(item.id, x, y)}
-              onContextMenu={e => handleContextMenu(e, item.id)}
+              onDragEnd={handleItemDragEnd}
+              onContextMenu={handleContextMenu}
               draggable={state.currentTool === 'select'}
               showDimensions={state.showDimensions}
             />

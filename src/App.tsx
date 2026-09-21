@@ -65,7 +65,13 @@ export default function App() {
 
   // Auto-save every 5 minutes
   useEffect(() => {
+    // FIX #2 (drag/drop audit): if a quota-exceeded (or other) failure
+    // happens, DO NOT call the blocking alert() — it froze the event loop
+    // and could cancel any in-flight HTML5 drag. Also stop retrying once we
+    // hit a persistent quota error to avoid a fresh failure every 5 min.
+    let quotaHit = false;
     const interval = setInterval(() => {
+      if (quotaHit) return;
       const s = stateRef.current;
       if (s.items.length === 0) return; // nothing to save
 
@@ -104,8 +110,14 @@ export default function App() {
           }
         }
       } catch (err) {
+        // FIX #2: log only — do not alert(). Suspend further auto-saves if
+        // this looks like a storage quota problem so we don't loop.
         console.error('Auto-save failed:', err);
-        alert(err instanceof Error ? err.message : 'Auto-save failed.');
+        const msg = err instanceof Error ? err.message : String(err);
+        if (/quota|storage/i.test(msg)) {
+          quotaHit = true;
+          console.warn('Auto-save disabled for this session (storage full).');
+        }
       }
     }, 300000);
     return () => clearInterval(interval);
@@ -246,7 +258,10 @@ export default function App() {
         {/* Canvas */}
         <CanvasStage
           stageRef={stageRef}
-          onContextMenu={(menu) => setContextMenu(menu)}
+          // FIX #6 (drag/drop audit): pass the stable state setter directly
+          // instead of an inline arrow, so handleContextMenu inside
+          // CanvasStage doesn't churn on every App render.
+          onContextMenu={setContextMenu}
           eraseMode={eraseMode}
           eraseBrushSize={eraseBrushSize}
           onExportRegionSelected={handleExportRegionSelected}

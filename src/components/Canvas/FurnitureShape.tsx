@@ -5,10 +5,14 @@ import { CanvasItem } from '../../types';
 interface Props {
   item: CanvasItem;
   isSelected: boolean;
-  onSelect: (e: any) => void;
+  // FIX #6 (drag/drop audit): callback signatures accept the item id so
+  // parents can pass STABLE handlers (no per-item inline arrows). This lets
+  // React.memo actually short-circuit re-renders when only unrelated state
+  // changes.
+  onSelect: (e: any, id: string) => void;
   onDragStart: () => void;
-  onDragEnd: (x: number, y: number) => void;
-  onContextMenu: (e: any) => void;
+  onDragEnd: (id: string, x: number, y: number) => void;
+  onContextMenu: (e: any, id: string) => void;
   draggable: boolean;
   showDimensions?: boolean;
 }
@@ -1640,9 +1644,14 @@ function FurnitureShapeInner({
   const [loadedImage, setLoadedImage] = useState<HTMLImageElement | null>(null);
   useEffect(() => {
     if (!item.imageData) { setLoadedImage(null); return; }
+    // FIX #5 (drag/drop audit): guard against stale onload firing after
+    // imageData changes or after unmount — otherwise setState on unmounted
+    // components and race-condition overwrites.
+    let alive = true;
     const img = new window.Image();
-    img.onload = () => setLoadedImage(img);
+    img.onload = () => { if (alive) setLoadedImage(img); };
     img.src = item.imageData;
+    return () => { alive = false; };
   }, [item.imageData]);
 
   const showLabel = item.label && item.label.trim().length > 0;
@@ -1672,11 +1681,14 @@ function FurnitureShapeInner({
       rotation={item.rotation}
       opacity={item.opacity}
       draggable={draggable && !item.locked}
-      onClick={onSelect}
-      onTap={onSelect}
+      // FIX #6 (drag/drop audit): dispatch to stable parent callbacks with
+      // item.id passed at call time (parent handlers no longer need per-item
+      // inline wrappers).
+      onClick={e => onSelect(e, item.id)}
+      onTap={e => onSelect(e, item.id)}
       onDragStart={onDragStart}
-      onDragEnd={e => onDragEnd(e.target.x(), e.target.y())}
-      onContextMenu={onContextMenu}
+      onDragEnd={e => onDragEnd(item.id, e.target.x(), e.target.y())}
+      onContextMenu={e => onContextMenu(e, item.id)}
       data-widthPx={item.widthPx}
       data-heightPx={item.heightPx}
     >

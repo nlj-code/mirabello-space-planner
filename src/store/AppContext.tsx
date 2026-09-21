@@ -192,27 +192,57 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const historyRef = useRef<CanvasItem[][]>([]);
   const futureRef = useRef<CanvasItem[][]>([]);
 
+  // FIX #7 (drag/drop audit): give pushHistory/undo/redo stable identities by
+  // reading state.items through a ref instead of a closure dep. Previously,
+  // depending on state.items re-created these callbacks on every mutation,
+  // which invalidated every consumer's useCallback/useEffect that had them in
+  // deps (Konva onMouseUp was reinstalled constantly, cascading GC pressure).
+  const itemsRef = useRef(state.items);
+  itemsRef.current = state.items;
+
+  // FIX #3 (drag/drop audit): strip large `imageData` from items stored in
+  // history so multi-MB base64 snapshot strings are not retained by every
+  // history frame. imageData is kept in a separate ref keyed by item id and
+  // merged back on undo/redo.
+  const imageDataRef = useRef<Map<string, string>>(new Map());
+  const stripImageData = (items: CanvasItem[]): CanvasItem[] =>
+    items.map(({ imageData, ...rest }) => {
+      if (imageData) imageDataRef.current.set(rest.id, imageData);
+      return rest as CanvasItem;
+    });
+  const restoreImageData = (items: CanvasItem[]): CanvasItem[] =>
+    items.map(i => {
+      const img = imageDataRef.current.get(i.id);
+      return img ? { ...i, imageData: img } : i;
+    });
+
   const pushHistory = useCallback(() => {
-    historyRef.current = [...historyRef.current, state.items.map(i => ({ ...i }))];
+    // FIX #7 + #3: use itemsRef and strip imageData before cloning
+    historyRef.current = [
+      ...historyRef.current,
+      stripImageData(itemsRef.current).map(i => ({ ...i })),
+    ];
     if (historyRef.current.length > 50) historyRef.current.shift();
     futureRef.current = [];
-  }, [state.items]);
+  }, []);
 
   const undo = useCallback(() => {
     if (historyRef.current.length === 0) return;
-    futureRef.current = [state.items, ...futureRef.current];
+    // FIX #7 + #3
+    futureRef.current = [stripImageData(itemsRef.current), ...futureRef.current];
     const prev = historyRef.current[historyRef.current.length - 1];
     historyRef.current = historyRef.current.slice(0, -1);
-    dispatch({ type: 'SET_ITEMS', items: prev });
-  }, [state.items]);
+    dispatch({ type: 'SET_ITEMS', items: restoreImageData(prev) });
+  }, []);
 
   const redo = useCallback(() => {
     if (futureRef.current.length === 0) return;
-    historyRef.current = [...historyRef.current, state.items];
+    // FIX #7 + #3
+    historyRef.current = [...historyRef.current, stripImageData(itemsRef.current)];
     const next = futureRef.current[0];
     futureRef.current = futureRef.current.slice(1);
-    dispatch({ type: 'SET_ITEMS', items: next });
-  }, [state.items]);
+    dispatch({ type: 'SET_ITEMS', items: restoreImageData(next) });
+  }, []);
 
   return (
     <AppContext.Provider value={{
