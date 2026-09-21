@@ -110,6 +110,14 @@ export default function CanvasStage({ stageRef, onContextMenu, eraseMode, eraseB
       floorImageRef.current = img;
       setFloorImage(img);
     };
+    // FIX #7.3c (project storage audit): handle broken/corrupt image data
+    // (e.g. from a malformed import) rather than silently showing nothing.
+    img.onerror = () => {
+      if (!alive) return;
+      console.warn('[CanvasStage] Floor plan image failed to decode.');
+      floorImageRef.current = null;
+      setFloorImage(null);
+    };
     img.src = state.floorPlan.imageData;
     return () => { alive = false; };
   }, [state.floorPlan]);

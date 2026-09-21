@@ -64,6 +64,13 @@ export interface Project {
   stageX: number;
   stageY: number;
   stageScale: number;
+  // FIX #7.5c (project storage audit): explicit schema version so future
+  // schema changes can migrate old exports safely.
+  schemaVersion?: number;
+  // FIX #7.3e (project storage audit): measurements and erase strokes are now
+  // persisted with the project (previously silently dropped on save/load).
+  measurementLines?: MeasurementLine[];
+  eraseStrokes?: EraseStroke[];
 }
 
 export type Tool = 'select' | 'scale' | 'pan' | 'measure' | 'erase' | 'export' | 'snapshot';
@@ -101,6 +108,10 @@ export interface AppState {
   measurementLines: MeasurementLine[];
   eraseStrokes: EraseStroke[];
   selectedEraseId: string | null;
+  // FIX #7.4d (project storage audit): tracks whether the workspace has
+  // unsaved changes so the beforeunload handler can prompt only when it
+  // matters and the "Load / New" flows can warn correctly.
+  dirty: boolean;
 }
 
 export interface HistoryState {
@@ -131,4 +142,13 @@ export type AppAction =
   | { type: 'UNDO_LAST_ERASE' }
   | { type: 'DELETE_ERASE_STROKE'; id: string }
   | { type: 'SELECT_ERASE_STROKE'; id: string | null }
-  | { type: 'CLEAR_ERASE_STROKES' };
+  | { type: 'CLEAR_ERASE_STROKES' }
+  // FIX #7.4c (project storage audit): explicit New Project reset that clears
+  // items, floor plan, scale, measurements, erase strokes and current project.
+  | { type: 'RESET_STATE' }
+  // FIX #7.4d (project storage audit): mark clean after a successful save; the
+  // reducer sets dirty=true on any user-content mutation.
+  | { type: 'MARK_CLEAN' }
+  // FIX #7.4a (project storage audit): allow renaming the currently loaded
+  // project in place without a full LOAD_PROJECT round trip.
+  | { type: 'SET_CURRENT_PROJECT_NAME'; name: string };

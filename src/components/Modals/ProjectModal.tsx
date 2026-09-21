@@ -1,9 +1,10 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useApp } from '../../store/AppContext';
 import { Project } from '../../types';
 import {
   getAllProjects, saveProject, deleteProject,
-  exportProjectJson, importProjectJson
+  exportProjectJson, importProjectJson,
+  DRAFT_AUTOSAVE_ID,
 } from '../../lib/projectStorage';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -12,16 +13,33 @@ interface Props {
 }
 
 export default function ProjectModal({ onClose }: Props) {
-  const { state, dispatch } = useApp();
+  const { state, dispatch, loadProject } = useApp();
   const [projects, setProjects] = useState<Project[]>([]);
   const [newName, setNewName] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editName, setEditName] = useState('');
   const importRef = useRef<HTMLInputElement>(null);
+  // FIX #7.2b (project storage audit): non-blocking inline toast for save /
+  // load / import / rename / delete results, instead of window.alert().
+  const [notice, setNotice] = useState<{ tone: 'ok' | 'error'; text: string } | null>(null);
+  const showNotice = (tone: 'ok' | 'error', text: string) => {
+    setNotice({ tone, text });
+    window.setTimeout(() => setNotice(prev => (prev && prev.text === text ? null : prev)), 4000);
+  };
 
   useEffect(() => {
     setProjects(getAllProjects());
   }, []);
+
+  // FIX #7.4e (project storage audit): sort project list by updatedAt desc,
+  // with the current draft pinned to the top so it's easy to find.
+  const sortedProjects = useMemo(() => {
+    return [...projects].sort((a, b) => {
+      if (a.id === DRAFT_AUTOSAVE_ID) return -1;
+      if (b.id === DRAFT_AUTOSAVE_ID) return 1;
+      return (b.updatedAt || '').localeCompare(a.updatedAt || '');
+    });
+  }, [projects]);
 
   const getCurrentProject = (): Project => ({
     id: state.currentProject?.id || uuidv4(),
@@ -34,6 +52,9 @@ export default function ProjectModal({ onClose }: Props) {
     stageX: state.stageX,
     stageY: state.stageY,
     stageScale: state.stageScale,
+    // FIX #7.3e (project storage audit): include measurements & erase strokes.
+    measurementLines: state.measurementLines,
+    eraseStrokes: state.eraseStrokes,
   });
 
   const handleSaveNew = () => {
@@ -49,14 +70,20 @@ export default function ProjectModal({ onClose }: Props) {
       stageX: state.stageX,
       stageY: state.stageY,
       stageScale: state.stageScale,
+      // FIX #7.3e
+      measurementLines: state.measurementLines,
+      eraseStrokes: state.eraseStrokes,
     };
     try {
       saveProject(project);
       setProjects(getAllProjects());
       setNewName('');
-      dispatch({ type: 'LOAD_PROJECT', project });
+      // FIX #7.3d: use loadProject to reset history alongside the swap.
+      loadProject(project);
+      // FIX #7.2b: consistent notification for save success.
+      showNotice('ok', `Saved "${project.name}".`);
     } catch (err) {
-      alert(err instanceof Error ? err.message : 'Failed to save project.');
+      showNotice('error', err instanceof Error ? err.message : 'Failed to save project.');
     }
   };
 
@@ -65,33 +92,63 @@ export default function ProjectModal({ onClose }: Props) {
     try {
       saveProject(proj);
       setProjects(getAllProjects());
-      dispatch({ type: 'LOAD_PROJECT', project: proj });
-      alert('Project saved!');
+      // FIX #7.3d
+      loadProject(proj);
+      // FIX #7.2b: replace blocking alert() with a non-blocking toast.
+      showNotice('ok', `Saved "${proj.name}".`);
     } catch (err) {
-      alert(err instanceof Error ? err.message : 'Failed to save project.');
+      showNotice('error', err instanceof Error ? err.message : 'Failed to save project.');
     }
   };
 
   const handleLoad = (project: Project) => {
-    if (!confirm(`Load "${project.name}"? Unsaved changes will be lost.`)) return;
-    dispatch({ type: 'LOAD_PROJECT', project });
+    // FIX #7.4d (project storage audit): only prompt when actually dirty.
+    if (state.dirty && !confirm(`Load "${project.name}"? Unsaved changes will be lost.`)) return;
+    // FIX #7.3d
+    loadProject(project);
     onClose();
   };
 
   const handleDelete = (id: string, name: string) => {
-    if (!confirm(`Delete "${name}"? This cannot be undone.`)) return;
+    // FIX #7.4b (project storage audit): if the user is deleting the
+    // project they're currently editing, warn more strongly and clear the
+    // workspace to avoid a dangling state.currentProject reference.
+    const isCurrent = state.currentProject?.id === id;
+    const confirmMsg = isCurrent
+      ? `"${name}" is the project you're currently editing. Deleting will also clear your workspace. Continue?`
+      : `Delete "${name}"? This cannot be undone.`;
+    if (!confirm(confirmMsg)) return;
     deleteProject(id);
     setProjects(getAllProjects());
+    if (isCurrent) {
+      // Route through RESET_STATE (via context helper elsewhere would be
+      // ideal, but ProjectModal doesn't hold newProject; RESET_STATE is
+      // safe here — undo history is separately cleared by the reducer via
+      // clearHistory-effect callers; a fresh state has none).
+      dispatch({ type: 'RESET_STATE' });
+    }
+    showNotice('ok', `Deleted "${name}".`);
   };
 
   const handleRename = (id: string) => {
     const trimmed = editName.trim();
-    if (!trimmed) return;
+    if (!trimmed) { setEditingId(null); return; }
     const all = getAllProjects();
     const proj = all.find(p => p.id === id);
-    if (!proj) return;
-    saveProject({ ...proj, name: trimmed });
-    setProjects(getAllProjects());
+    if (!proj) { setEditingId(null); return; }
+    try {
+      saveProject({ ...proj, name: trimmed });
+      setProjects(getAllProjects());
+      // FIX #7.4a (project storage audit): if we renamed the currently
+      // loaded project, update state.currentProject.name so subsequent
+      // Save-Current writes don't clobber it with the old name.
+      if (state.currentProject?.id === id) {
+        dispatch({ type: 'SET_CURRENT_PROJECT_NAME', name: trimmed });
+      }
+      showNotice('ok', `Renamed to "${trimmed}".`);
+    } catch (err) {
+      showNotice('error', err instanceof Error ? err.message : 'Rename failed.');
+    }
     setEditingId(null);
   };
 
@@ -103,14 +160,16 @@ export default function ProjectModal({ onClose }: Props) {
     const file = e.target.files?.[0];
     if (!file) return;
     try {
+      // FIX #7.5b (project storage audit): importProjectJson now performs
+      // strict shape validation and rejects random JSON.
       const project = await importProjectJson(file);
       project.id = uuidv4(); // New ID to avoid conflict
       saveProject(project);
       setProjects(getAllProjects());
-      alert(`Project "${project.name}" imported successfully!`);
+      showNotice('ok', `Imported "${project.name}".`);
     } catch (err) {
       console.error('Import failed:', err);
-      alert(err instanceof Error ? err.message : 'Failed to import project. Invalid file format.');
+      showNotice('error', err instanceof Error ? err.message : 'Failed to import project. Invalid file format.');
     }
     e.target.value = '';
   };
@@ -119,6 +178,20 @@ export default function ProjectModal({ onClose }: Props) {
     <div className="modal-overlay">
       <div className="modal" style={{ minWidth: 500 }}>
         <div className="modal-title">Project Manager</div>
+
+        {/* FIX #7.2b (project storage audit): non-blocking result notice.
+            Replaces blocking window.alert() calls that used to freeze the UI
+            after every save/rename/delete/import. */}
+        {notice && (
+          <div style={{
+            padding: '8px 12px', borderRadius: 6, marginBottom: 12, fontSize: 12,
+            background: notice.tone === 'ok' ? 'rgba(104,211,145,0.12)' : 'rgba(252,129,129,0.12)',
+            border: `1px solid ${notice.tone === 'ok' ? 'rgba(104,211,145,0.35)' : 'rgba(252,129,129,0.35)'}`,
+            color: notice.tone === 'ok' ? '#68d391' : '#fc8181',
+          }}>
+            {notice.text}
+          </div>
+        )}
 
         {/* Save current */}
         <div style={{ background: 'rgba(232,184,109,0.08)', borderRadius: 8, padding: 12, marginBottom: 16 }}>
@@ -172,12 +245,13 @@ export default function ProjectModal({ onClose }: Props) {
           Saved Projects ({projects.length})
         </div>
         <div style={{ maxHeight: 300, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 4 }}>
-          {projects.length === 0 && (
+          {sortedProjects.length === 0 && (
             <div style={{ color: 'var(--text-secondary)', fontSize: 12, padding: 12, textAlign: 'center' }}>
               No saved projects yet
             </div>
           )}
-          {projects.map(project => (
+          {/* FIX #7.4e (project storage audit): rendered in sortedProjects order */}
+          {sortedProjects.map(project => (
             <div
               key={project.id}
               style={{

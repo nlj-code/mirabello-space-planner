@@ -14,6 +14,10 @@ interface Props {
   setEraseMode: (mode: 'brush' | 'rect') => void;
   eraseBrushSize: number;
   setEraseBrushSize: (size: number) => void;
+  // FIX #7.4c (project storage audit): New Project action.
+  onNewProject?: () => void;
+  // FIX #7.4d (project storage audit): unsaved indicator.
+  dirty?: boolean;
 }
 
 const TOOLS: { id: Tool; label: string; icon: React.ReactNode; title: string }[] = [
@@ -80,6 +84,8 @@ export default function Toolbar({
   onOpenScaleModal, onOpenProjectModal, onOpenExportModal,
   onZoomIn, onZoomOut, onZoomFit,
   eraseMode, setEraseMode, eraseBrushSize, setEraseBrushSize,
+  // FIX #7.4c + #7.4d (project storage audit)
+  onNewProject, dirty,
 }: Props) {
   const { state, dispatch, undo, redo, canUndo, canRedo } = useApp();
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -325,6 +331,23 @@ export default function Toolbar({
 
       <div className="toolbar-divider" />
 
+      {/* FIX #7.4c (project storage audit): New Project button. Clears
+          workspace via reducer + history reset; parent handles unsaved-
+          changes confirmation. */}
+      {onNewProject && (
+        <button
+          className="btn btn-ghost"
+          style={{ fontSize: 11, padding: '5px 10px' }}
+          onClick={onNewProject}
+          title="New Project (clears the workspace)"
+        >
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <path d="M12 5v14M5 12h14" />
+          </svg>
+          New
+        </button>
+      )}
+
       {/* Projects & Export */}
       <button
         className="btn btn-ghost"
@@ -336,6 +359,17 @@ export default function Toolbar({
           <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" />
         </svg>
         Projects
+        {/* FIX #7.4d (project storage audit): unsaved indicator */}
+        {dirty && (
+          <span
+            title="Unsaved changes"
+            style={{
+              display: 'inline-block',
+              width: 6, height: 6, borderRadius: '50%',
+              background: '#e8b86d', marginLeft: 6,
+            }}
+          />
+        )}
       </button>
 
       <button

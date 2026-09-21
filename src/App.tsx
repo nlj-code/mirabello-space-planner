@@ -11,9 +11,18 @@ import ExportModal from './components/Modals/ExportModal';
 import ContextMenu from './components/Canvas/ContextMenu';
 import StatusBar from './components/Canvas/StatusBar';
 import AutoSaveNameModal from './components/Modals/AutoSaveNameModal';
-import { saveProject, purgeAutoSaves } from './lib/projectStorage';
+import {
+  saveProject,
+  purgeAutoSaves,
+  DRAFT_AUTOSAVE_ID,
+  getDraftAutosave,
+  deleteDraftAutosave,
+  getLastCorruptionReport,
+  clearLastCorruptionReport,
+  getAllProjects,
+} from './lib/projectStorage';
 import { ExportRegion } from './lib/exportHelper';
-import { Tool } from './types';
+import { Tool, Project } from './types';
 import { v4 as uuidv4 } from 'uuid';
 
 interface CtxMenu {
@@ -23,7 +32,7 @@ interface CtxMenu {
 }
 
 export default function App() {
-  const { state, dispatch } = useApp();
+  const { state, dispatch, loadProject, newProject } = useApp();
   const stageRef = useRef<Konva.Stage>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [showScaleModal, setShowScaleModal] = useState(false);
@@ -40,6 +49,18 @@ export default function App() {
   const stateRef = useRef(state);
   stateRef.current = state;
   const previousToolRef = useRef<Tool>('select');
+
+  // FIX #7.2a (project storage audit): non-blocking banner state for
+  // auto-save failures. Only shows when auto-save has been suspended so the
+  // designer can react (Save Now / Export JSON) instead of losing work.
+  const [autoSaveError, setAutoSaveError] = useState<string | null>(null);
+
+  // FIX #7.6d (project storage audit): on startup, look for an unnamed
+  // auto-save draft with actual content and offer to restore it. Also
+  // surface any store-corruption backup so the user knows their data is
+  // still recoverable.
+  const [recoveryDraft, setRecoveryDraft] = useState<Project | null>(null);
+  const [corruptionMsg, setCorruptionMsg] = useState<string | null>(null);
 
   // Reset export notice visibility whenever export mode is (re-)entered
   useEffect(() => {
@@ -63,12 +84,34 @@ export default function App() {
   // One-time cleanup: remove legacy duplicate Auto-save entries on startup
   useEffect(() => { purgeAutoSaves(); }, []);
 
+  // FIX #7.6d (project storage audit): on startup, look for a non-empty draft
+  // auto-save and any corruption report from projectStorage. Runs once.
+  useEffect(() => {
+    try {
+      // Trigger a read so the corruption detector has a chance to log/backup.
+      getAllProjects();
+      const rep = getLastCorruptionReport();
+      if (rep) {
+        setCorruptionMsg(
+          `Your saved projects file was unreadable. A backup was kept at "${rep.backupKey || '<unavailable>'}" (${rep.rawByteLength} bytes). Contact support if you need it restored.`
+        );
+        clearLastCorruptionReport();
+      }
+      const draft = getDraftAutosave();
+      if (draft && draft.items.length > 0) setRecoveryDraft(draft);
+    } catch (err) {
+      console.warn('Startup recovery check failed:', err);
+    }
+  }, []);
+
   // Auto-save every 5 minutes
   useEffect(() => {
     // FIX #2 (drag/drop audit): if a quota-exceeded (or other) failure
     // happens, DO NOT call the blocking alert() — it froze the event loop
     // and could cancel any in-flight HTML5 drag. Also stop retrying once we
     // hit a persistent quota error to avoid a fresh failure every 5 min.
+    // FIX #7.2a (project storage audit): also surface a non-blocking banner
+    // so the user KNOWS auto-save has stopped and can save manually / export.
     let quotaHit = false;
     const interval = setInterval(() => {
       if (quotaHit) return;
@@ -89,11 +132,14 @@ export default function App() {
             stageX: s.stageX,
             stageY: s.stageY,
             stageScale: s.stageScale,
+            // FIX #7.3e: include measurements & erase strokes in every save.
+            measurementLines: s.measurementLines,
+            eraseStrokes: s.eraseStrokes,
           });
         } else {
           // Unnamed project — silently persist as draft so work isn't lost
           saveProject({
-            id: 'draft-autosave',
+            id: DRAFT_AUTOSAVE_ID,
             name: 'Untitled Draft',
             createdAt: new Date().toISOString(),
             updatedAt: new Date().toISOString(),
@@ -103,17 +149,25 @@ export default function App() {
             stageX: s.stageX,
             stageY: s.stageY,
             stageScale: s.stageScale,
+            // FIX #7.3e
+            measurementLines: s.measurementLines,
+            eraseStrokes: s.eraseStrokes,
           });
           // Prompt to name it, but only once per session
           if (!autoSavePromptDismissedRef.current) {
             setShowAutoSavePrompt(true);
           }
         }
+        // Successful save clears any stale error banner and dirty flag.
+        if (autoSaveError) setAutoSaveError(null);
+        dispatch({ type: 'MARK_CLEAN' });
       } catch (err) {
         // FIX #2: log only — do not alert(). Suspend further auto-saves if
         // this looks like a storage quota problem so we don't loop.
         console.error('Auto-save failed:', err);
         const msg = err instanceof Error ? err.message : String(err);
+        // FIX #7.2a: surface the failure visibly.
+        setAutoSaveError(msg);
         if (/quota|storage/i.test(msg)) {
           quotaHit = true;
           console.warn('Auto-save disabled for this session (storage full).');
@@ -121,10 +175,28 @@ export default function App() {
       }
     }, 300000);
     return () => clearInterval(interval);
+    // dispatch and autoSaveError are stable/reactive but not needed to re-run
+    // the interval — leaving deps empty keeps the timer registered once.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // FIX #7.4d (project storage audit): warn on tab close / reload when there
+  // are unsaved changes. The dirty flag is maintained by the reducer; this
+  // effect only wires the beforeunload handler.
+  useEffect(() => {
+    if (!state.dirty) return;
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      // Modern browsers ignore custom text — the presence of preventDefault
+      // and returnValue is what triggers the native prompt.
+      e.returnValue = '';
+    };
+    window.addEventListener('beforeunload', onBeforeUnload);
+    return () => window.removeEventListener('beforeunload', onBeforeUnload);
+  }, [state.dirty]);
+
   const handleAutoSaveNamed = useCallback((name: string) => {
-    const project = {
+    const project: Project = {
       id: uuidv4(),
       name,
       createdAt: new Date().toISOString(),
@@ -135,15 +207,46 @@ export default function App() {
       stageX: state.stageX,
       stageY: state.stageY,
       stageScale: state.stageScale,
+      // FIX #7.3e
+      measurementLines: state.measurementLines,
+      eraseStrokes: state.eraseStrokes,
     };
     try {
       saveProject(project);
-      dispatch({ type: 'LOAD_PROJECT', project });
+      // FIX #7.6e (project storage audit): delete the leftover unnamed draft
+      // once it has been named, so it doesn't linger as a duplicate.
+      try { deleteDraftAutosave(); } catch { /* best effort */ }
+      // FIX #7.3d (project storage audit): route through loadProject so undo
+      // history from the draft session doesn't corrupt the named project.
+      loadProject(project);
     } catch (err) {
-      alert(err instanceof Error ? err.message : 'Failed to save project.');
+      // FIX #7.2b: non-blocking error surface (banner) rather than alert().
+      setAutoSaveError(err instanceof Error ? err.message : 'Failed to save project.');
     }
     setShowAutoSavePrompt(false);
-  }, [state, dispatch]);
+  }, [state, loadProject]);
+
+  // FIX #7.4c + #7.4d (project storage audit): explicit New Project flow
+  // that clears items / floor plan / scale / measurements / erase strokes /
+  // history and warns before discarding unsaved changes.
+  const handleNewProject = useCallback(() => {
+    if (state.dirty) {
+      const ok = window.confirm('You have unsaved changes. Start a new project anyway?');
+      if (!ok) return;
+    }
+    newProject();
+  }, [state.dirty, newProject]);
+
+  // FIX #7.6d (project storage audit): recovery actions offered on startup.
+  const handleRestoreDraft = useCallback(() => {
+    if (!recoveryDraft) return;
+    loadProject(recoveryDraft);
+    setRecoveryDraft(null);
+  }, [recoveryDraft, loadProject]);
+  const handleDiscardDraft = useCallback(() => {
+    try { deleteDraftAutosave(); } catch { /* best effort */ }
+    setRecoveryDraft(null);
+  }, []);
 
   // Global keyboard shortcuts
   useEffect(() => {
@@ -245,6 +348,11 @@ export default function App() {
         setEraseMode={setEraseMode}
         eraseBrushSize={eraseBrushSize}
         setEraseBrushSize={setEraseBrushSize}
+        // FIX #7.4c (project storage audit): New Project button.
+        onNewProject={handleNewProject}
+        // FIX #7.4d: reflect unsaved state on the toolbar (used for the
+        // "unsaved" indicator).
+        dirty={state.dirty}
       />
 
       {/* Main area */}
@@ -347,6 +455,75 @@ export default function App() {
           itemId={contextMenu.itemId}
           onClose={() => setContextMenu(null)}
         />
+      )}
+
+      {/* FIX #7.2a (project storage audit): auto-save failure banner.
+          Non-blocking; offers Save Now and Dismiss. */}
+      {autoSaveError && (
+        <div style={{
+          position: 'fixed', bottom: 40, left: '50%',
+          transform: 'translateX(-50%)',
+          background: '#5a1a1a',
+          border: '1px solid #a04040',
+          color: '#ffd5d5',
+          padding: '10px 18px', borderRadius: 8,
+          fontSize: 13, zIndex: 2000,
+          display: 'flex', gap: 12, alignItems: 'center',
+          boxShadow: '0 6px 30px rgba(0,0,0,0.6)',
+          maxWidth: '90vw',
+        }}>
+          <span>⚠ Auto-save failed: {autoSaveError}. Open Projects → Save now, or Export JSON.</span>
+          <button
+            className="btn btn-ghost"
+            style={{ fontSize: 11, padding: '3px 8px', color: '#ffd5d5', borderColor: '#a04040' }}
+            onClick={() => setShowProjectModal(true)}
+          >
+            Open Projects
+          </button>
+          <button
+            className="btn btn-ghost"
+            style={{ fontSize: 11, padding: '3px 8px', color: '#ffd5d5', borderColor: '#a04040' }}
+            onClick={() => setAutoSaveError(null)}
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
+      {/* FIX #7.3a (project storage audit): corruption warning. */}
+      {corruptionMsg && (
+        <div className="modal-overlay">
+          <div className="modal" style={{ maxWidth: 460 }}>
+            <div className="modal-title">Project store recovered</div>
+            <p style={{ fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.6 }}>
+              {corruptionMsg}
+            </p>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 12 }}>
+              <button className="btn btn-primary" onClick={() => setCorruptionMsg(null)}>OK</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* FIX #7.6d (project storage audit): crash-recovery prompt on
+          startup — only appears when a non-empty draft exists. */}
+      {recoveryDraft && !corruptionMsg && (
+        <div className="modal-overlay">
+          <div className="modal" style={{ maxWidth: 460 }}>
+            <div className="modal-title">Restore last session?</div>
+            <p style={{ fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.6 }}>
+              We found an auto-saved draft from your last session
+              ({recoveryDraft.items.length} items,
+              updated {new Date(recoveryDraft.updatedAt).toLocaleString()}).
+              Would you like to restore it?
+            </p>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 12 }}>
+              <button className="btn btn-ghost" onClick={handleDiscardDraft}>Discard</button>
+              <button className="btn btn-ghost" onClick={() => setRecoveryDraft(null)}>Later</button>
+              <button className="btn btn-primary" onClick={handleRestoreDraft}>Restore</button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Empty state hint */}

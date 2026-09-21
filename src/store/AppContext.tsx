@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useReducer, useRef, useCallback } from 'react';
-import { AppState, AppAction, CanvasItem, Tool, ScaleCalibration, FloorPlan, Project, MeasurementLine } from '../types';
+import { AppState, AppAction, CanvasItem, Tool, ScaleCalibration, Project } from '../types';
 import { produce } from 'immer';
 
 const initialScale: ScaleCalibration = {
@@ -24,7 +24,22 @@ const initialState: AppState = {
   measurementLines: [],
   eraseStrokes: [],
   selectedEraseId: null,
+  // FIX #7.4d (project storage audit)
+  dirty: false,
 };
+
+// FIX #7.4d (project storage audit): actions that represent user edits to
+// persistable content should mark the workspace dirty. Tool / selection /
+// pan / zoom are excluded — they are ephemeral.
+const DIRTYING_ACTIONS = new Set<AppAction['type']>([
+  'SET_SCALE', 'SET_FLOOR_PLAN',
+  'ADD_ITEM', 'UPDATE_ITEM', 'DELETE_ITEMS', 'SET_ITEMS',
+  'BRING_FORWARD', 'SEND_BACKWARD',
+  'GROUP_ITEMS', 'UNGROUP_ITEM',
+  'ADD_MEASUREMENT', 'REMOVE_MEASUREMENT', 'CLEAR_MEASUREMENTS',
+  'ADD_ERASE_STROKE', 'UNDO_LAST_ERASE', 'DELETE_ERASE_STROKE', 'CLEAR_ERASE_STROKES',
+  'SET_CURRENT_PROJECT_NAME',
+]);
 
 function appReducer(state: AppState, action: AppAction): AppState {
   return produce(state, draft => {
@@ -77,6 +92,13 @@ function appReducer(state: AppState, action: AppAction): AppState {
         draft.stageScale = p.stageScale;
         draft.selectedIds = [];
         draft.currentProject = p;
+        // FIX #7.3e (project storage audit): restore measurements and erase
+        // strokes that used to be dropped on save/load.
+        draft.measurementLines = Array.isArray(p.measurementLines) ? p.measurementLines : [];
+        draft.eraseStrokes = Array.isArray(p.eraseStrokes) ? p.eraseStrokes : [];
+        draft.selectedEraseId = null;
+        // FIX #7.4d: freshly loaded state is clean.
+        draft.dirty = false;
         break;
       }
       case 'BRING_FORWARD': {
@@ -170,7 +192,40 @@ function appReducer(state: AppState, action: AppAction): AppState {
         draft.eraseStrokes = [];
         draft.selectedEraseId = null;
         break;
+      // FIX #7.4c (project storage audit): explicit New Project reset. Clears
+      // every piece of user content; leaves display prefs alone.
+      case 'RESET_STATE':
+        draft.items = [];
+        draft.selectedIds = [];
+        draft.floorPlan = null;
+        draft.scale = initialScale;
+        draft.measurementLines = [];
+        draft.eraseStrokes = [];
+        draft.selectedEraseId = null;
+        draft.currentProject = null;
+        draft.stageX = 0;
+        draft.stageY = 0;
+        draft.stageScale = 1;
+        draft.currentTool = 'select';
+        draft.dirty = false;
+        break;
+      // FIX #7.4d (project storage audit)
+      case 'MARK_CLEAN':
+        draft.dirty = false;
+        break;
+      // FIX #7.4a (project storage audit): allow renaming the currently loaded
+      // project in place; keeps state.currentProject.name and updatedAt in sync.
+      case 'SET_CURRENT_PROJECT_NAME':
+        if (draft.currentProject) {
+          draft.currentProject.name = action.name;
+          draft.currentProject.updatedAt = new Date().toISOString();
+        }
+        break;
     }
+    // FIX #7.4d (project storage audit): mark dirty for any user-content
+    // action. LOAD_PROJECT / MARK_CLEAN / RESET_STATE set dirty explicitly
+    // above and are not in DIRTYING_ACTIONS.
+    if (DIRTYING_ACTIONS.has(action.type)) draft.dirty = true;
   });
 }
 
@@ -183,6 +238,13 @@ interface AppContextType {
   canUndo: boolean;
   canRedo: boolean;
   pushHistory: () => void;
+  // FIX #7.3d + #7.4c (project storage audit): high-level loaders/reset that
+  // clear the history stacks — never dispatch LOAD_PROJECT / RESET_STATE
+  // directly if you can avoid it; use these instead so undo can't corrupt
+  // one project with another's items.
+  loadProject: (project: Project) => void;
+  newProject: () => void;
+  clearHistory: () => void;
 }
 
 const AppContext = createContext<AppContextType | null>(null);
@@ -244,12 +306,35 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     dispatch({ type: 'SET_ITEMS', items: restoreImageData(next) });
   }, []);
 
+  // FIX #7.3d (project storage audit): clear both history stacks and the
+  // snapshot-image side-map. Called whenever we swap the project underneath
+  // undo, so undo can't leak items from the previous project into the new one.
+  const clearHistory = useCallback(() => {
+    historyRef.current = [];
+    futureRef.current = [];
+    imageDataRef.current = new Map();
+  }, []);
+
+  // FIX #7.3d + #7.4c (project storage audit): high-level loaders that always
+  // reset history alongside the state swap.
+  const loadProject = useCallback((project: Project) => {
+    clearHistory();
+    dispatch({ type: 'LOAD_PROJECT', project });
+  }, [clearHistory]);
+
+  const newProject = useCallback(() => {
+    clearHistory();
+    dispatch({ type: 'RESET_STATE' });
+  }, [clearHistory]);
+
   return (
     <AppContext.Provider value={{
       state, dispatch, undo, redo,
       canUndo: historyRef.current.length > 0,
       canRedo: futureRef.current.length > 0,
       pushHistory,
+      // FIX #7.3d + #7.4c
+      loadProject, newProject, clearHistory,
     }}>
       {children}
     </AppContext.Provider>
